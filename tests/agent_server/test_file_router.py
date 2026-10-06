@@ -18,6 +18,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import Request, UploadFile
 from fastapi.testclient import TestClient
+from starlette.responses import FileResponse
+from starlette.types import Message
 
 from openhands.agent_server import (
     bash_service as bash_mod,
@@ -867,6 +869,24 @@ def _app_request(client) -> Request:
     return Request({"type": "http", "app": client.app})
 
 
+async def _stream_trajectory(response: FileResponse) -> bytes:
+    chunks: list[bytes] = []
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b""}
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            chunks.append(message["body"])
+
+    await response(
+        {"type": "http", "method": "GET", "headers": [], "path": "/"},
+        receive,
+        send,
+    )
+    return b"".join(chunks)
+
+
 async def test_download_trajectory_repeat_survives_previous_cleanup(
     client, monkeypatch, tmp_path
 ):
@@ -884,12 +904,11 @@ async def test_download_trajectory_repeat_survives_previous_cleanup(
     second = await file_router_module.download_trajectory(
         conversation_id, _app_request(client)
     )
-    assert first.background is not None and second.background is not None
-    await first.background()
+    await _stream_trajectory(first)
 
     with zipfile.ZipFile(second.path) as archive:
         assert f"{conversation_id.hex}/base_state.json" in archive.namelist()
-    await second.background()
+    await _stream_trajectory(second)
     assert list(conversations_path.glob("*.zip")) == []
 
 
@@ -918,8 +937,7 @@ async def test_download_trajectory_concurrent_downloads_use_own_files(
             assert archive.testzip() is None
             assert f"{conversation_id.hex}/base_state.json" in archive.namelist()
     for response in responses:
-        assert response.background is not None
-        await response.background()
+        await _stream_trajectory(response)
     assert list(conversations_path.glob("*.zip")) == []
 
 

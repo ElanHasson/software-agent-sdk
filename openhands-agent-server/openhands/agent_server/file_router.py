@@ -26,6 +26,7 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from openhands.agent_server._secret_redaction import (
     redacted_json_bytes,
@@ -218,6 +219,14 @@ def _create_zip_from_directory(source_dir: Path, output_path: Path) -> None:
     except Exception:
         output_path.unlink(missing_ok=True)
         raise
+
+
+class _TemporaryFileResponse(FileResponse):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            Path(self.path).unlink(missing_ok=True)
 
 
 ArchiveFormat = Literal["git-delta", "tar.gz"]
@@ -952,16 +961,21 @@ async def download_trajectory(
     )
     os.close(fd)
     temp_file = Path(tmp_name)
+    zip_task = asyncio.create_task(
+        asyncio.to_thread(_create_zip_from_directory, conversation_dir, temp_file)
+    )
     try:
-        await asyncio.to_thread(_create_zip_from_directory, conversation_dir, temp_file)
+        await asyncio.shield(zip_task)
     except BaseException:
-        temp_file.unlink(missing_ok=True)
+        try:
+            await zip_task
+        finally:
+            temp_file.unlink(missing_ok=True)
         raise
-    return FileResponse(
+    return _TemporaryFileResponse(
         path=temp_file,
         filename=f"{conversation_id.hex}.zip",
         media_type="application/octet-stream",
-        background=BackgroundTask(temp_file.unlink, missing_ok=True),
     )
 
 
