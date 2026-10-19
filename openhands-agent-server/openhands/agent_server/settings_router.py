@@ -174,6 +174,7 @@ async def get_settings(request: Request) -> SettingsResponse:
             active_profile=settings.active_profile,
             active_agent_profile_id=settings.active_agent_profile_id,
             active_meta_profile=settings.active_meta_profile,
+            public_skills=settings.public_skills,
             misc_settings=settings.misc_settings,
         )
 
@@ -185,7 +186,9 @@ async def update_settings(
     """Update settings with partial changes.
 
     Accepts ``agent_settings_diff``, ``conversation_settings_diff``,
-    ``misc_settings_diff``, and/or ``active_profile`` for incremental updates.
+    ``misc_settings_diff``, ``active_profile``, and/or ``public_skills`` for
+    incremental updates. ``public_skills`` replaces the stored list; ``null``
+    restores the whole public catalog.
     Setting ``active_profile`` loads and applies that profile's LLM, same as
     ``POST /api/profiles/{name}/activate``, unless ``agent_settings_diff.llm``
     is also given.
@@ -222,6 +225,8 @@ async def update_settings(
         update_data["active_agent_profile_id"] = payload.active_agent_profile_id
     if "active_meta_profile" in payload.model_fields_set:
         update_data["active_meta_profile"] = payload.active_meta_profile
+    if "public_skills" in payload.model_fields_set:
+        update_data["public_skills"] = payload.public_skills
     if not update_data:
         # No updates provided - this is a client error
         raise HTTPException(
@@ -229,8 +234,8 @@ async def update_settings(
             detail=(
                 "At least one of agent_settings_diff, "
                 "conversation_settings_diff, misc_settings_diff, "
-                "active_profile, active_agent_profile_id, or active_meta_profile "
-                "must be provided"
+                "active_profile, active_agent_profile_id, active_meta_profile, "
+                "or public_skills must be provided"
             ),
         )
 
@@ -364,6 +369,7 @@ def _apply_settings_update(
         active_profile=settings.active_profile,
         active_agent_profile_id=settings.active_agent_profile_id,
         active_meta_profile=settings.active_meta_profile,
+        public_skills=settings.public_skills,
         misc_settings=settings.misc_settings,
     )
 

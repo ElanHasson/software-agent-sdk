@@ -171,6 +171,13 @@ class SettingsResponse(BaseModel):
         default=None,
         description="Name of the currently active meta-profile, if one is selected.",
     )
+    public_skills: list[str] | None = Field(
+        default=None,
+        description=(
+            "Public-catalog skills Agent Profile launches may load; null = the "
+            "whole catalog."
+        ),
+    )
     misc_settings: dict[str, Any] = Field(default_factory=dict)
 
     def get_agent_settings(self) -> AgentSettingsConfig:
@@ -224,6 +231,13 @@ class SettingsUpdateRequest(BaseModel):
         default=None,
         pattern=PROFILE_NAME_PATTERN,
         description="Name of the active meta-profile to persist; null clears it.",
+    )
+    public_skills: list[str] | None = Field(
+        default=None,
+        description=(
+            "Public-catalog skills Agent Profile launches may load; null "
+            "restores the whole catalog."
+        ),
     )
 
 

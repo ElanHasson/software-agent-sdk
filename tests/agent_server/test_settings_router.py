@@ -875,6 +875,25 @@ def test_existing_settings_load_with_null_active_agent_profile_id(
     assert body["active_agent_profile_id"] is None
 
 
+def test_patch_settings_sets_and_clears_public_skills(client_with_settings):
+    assert client_with_settings.get("/api/settings").json()["public_skills"] is None
+
+    set_response = client_with_settings.patch(
+        "/api/settings", json={"public_skills": ["alpha", "beta"]}
+    )
+    assert set_response.status_code == 200, set_response.text
+    assert set_response.json()["public_skills"] == ["alpha", "beta"]
+
+    empty = client_with_settings.patch("/api/settings", json={"public_skills": []})
+    assert empty.json()["public_skills"] == []
+
+    clear_response = client_with_settings.patch(
+        "/api/settings", json={"public_skills": None}
+    )
+    assert clear_response.status_code == 200, clear_response.text
+    assert client_with_settings.get("/api/settings").json()["public_skills"] is None
+
+
 def test_patch_settings_updates_condenser_config(client_with_settings):
     """PATCH /api/settings can update condenser constructor settings."""
     response = client_with_settings.patch(
@@ -1157,8 +1176,8 @@ def test_patch_settings_empty_payload_returns_400(client_with_settings):
     assert response.json()["detail"] == (
         "At least one of agent_settings_diff, "
         "conversation_settings_diff, misc_settings_diff, "
-        "active_profile, active_agent_profile_id, or active_meta_profile "
-        "must be provided"
+        "active_profile, active_agent_profile_id, active_meta_profile, "
+        "or public_skills must be provided"
     )
 
 

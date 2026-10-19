@@ -208,6 +208,48 @@ def test_public_skills_select_the_public_tier_and_a_launch_can_add_one(
     assert sorted(_agent_view(invoking["agent"])["skills"]) == ["alpha", "beta", "mine"]
 
 
+def test_server_public_skills_narrow_every_profile_launch_and_preview(server, tmp_path):
+    catalog = [*CATALOG, Skill(name="mine", content="m", description="user skill")]
+    every = _save(OpenHandsAgentProfile(name="every", llm_profile_ref="default"))
+    chosen = _save(
+        OpenHandsAgentProfile(
+            name="chosen", llm_profile_ref="default", public_skills=["alpha", "beta"]
+        )
+    )
+    workspace = str(tmp_path / "workspace")
+
+    def skills_of(profile: OpenHandsAgentProfile) -> list[str]:
+        preview = server.post(f"/api/agent-profiles/{profile.name}/materialize")
+        launched = _launch(server, workspace, agent_profile_id=str(profile.id))
+        skills = sorted(_agent_view(launched["agent"])["skills"])
+        assert sorted(preview.json()["resolved_skills"]) == skills
+        return skills
+
+    def set_public_skills(names: list[str] | None) -> None:
+        response = server.patch("/api/settings", json={"public_skills": names})
+        assert response.status_code == 200, response.text
+
+    with (
+        patch("openhands.agent_server.launch.discover_profile_skills", lambda: catalog),
+        patch(
+            "openhands.agent_server.launch.discover_public_skill_names",
+            lambda: {"alpha", "beta"},
+        ),
+        patch("openhands.agent_server.launch.is_tool_usable", return_value=True),
+    ):
+        assert skills_of(every) == ["alpha", "beta", "mine"]
+
+        set_public_skills(["alpha"])
+        assert skills_of(every) == ["alpha", "mine"]
+        assert skills_of(chosen) == ["alpha", "mine"]
+
+        set_public_skills([])
+        assert skills_of(every) == ["mine"]
+
+        set_public_skills(None)
+        assert skills_of(every) == ["alpha", "beta", "mine"]
+
+
 def test_the_global_critic_key_reaches_profile_launches_but_no_response(
     server, tmp_path
 ):

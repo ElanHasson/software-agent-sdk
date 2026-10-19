@@ -91,6 +91,7 @@ class SettingsUpdatePayload(TypedDict, total=False):
     active_profile: str | None
     active_agent_profile_id: str | None
     active_meta_profile: str | None
+    public_skills: list[str] | None
 
 
 def _deep_merge(
@@ -197,6 +198,15 @@ class PersistedSettings(BaseModel):
         description="Name of the currently active meta-profile used for "
         "intelligent model routing.",
     )
+    public_skills: list[str] | None = Field(
+        default=None,
+        description=(
+            "Which public-catalog skills Agent Profile launches may load. "
+            "null = the whole catalog; a list = only the named skills. A "
+            "profile's own `public_skills` narrows further. User and project "
+            "skills are not affected."
+        ),
+    )
     misc_settings: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -241,7 +251,8 @@ class PersistedSettings(BaseModel):
         """Apply a batch of changes from a nested dict.
 
         Accepts ``agent_settings_diff``, ``conversation_settings_diff``,
-        ``active_profile``, and ``active_agent_profile_id`` for partial updates.
+        ``active_profile``, ``active_agent_profile_id``, and ``public_skills``
+        for partial updates.
 
         ``agent_settings_diff`` is applied via :func:`apply_agent_settings_diff`:
         RFC 7386 merge-patch semantics with kind-switch awareness. When
@@ -325,6 +336,8 @@ class PersistedSettings(BaseModel):
                 self.active_profile = payload["active_profile"]
             if "active_agent_profile_id" in payload:
                 self.active_agent_profile_id = payload["active_agent_profile_id"]
+            if "public_skills" in payload:
+                self.public_skills = payload["public_skills"]
 
             # Update active_meta_profile if explicitly provided (incl. None)
             if "active_meta_profile" in payload:

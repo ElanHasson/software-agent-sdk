@@ -52,6 +52,7 @@ from openhands.sdk.settings.model import (
     ACPAgentSettings,
     validate_agent_settings,
 )
+from openhands.sdk.skills import Skill
 from openhands.sdk.tool import BROWSER_TOOL_NAME, is_tool_usable
 from openhands.sdk.utils.cipher import Cipher
 
@@ -70,13 +71,30 @@ def server_launch_stores(
         llm_profiles=llm_store,
         llm_profile_names=lambda: [n.removesuffix(".json") for n in llm_store.list()],
         mcp_config=settings.agent_settings.mcp_config,
-        skills=discover_profile_skills,
+        skills=_offered_skills(settings.public_skills),
         public_skill_names=discover_public_skill_names,
         critic_api_key=verification.critic_api_key if verification else None,
         agent_profiles=get_agent_profile_store(),
         meta_profiles=MetaProfileStore(base_dir=default_meta_profile_dir()),
         cipher=cipher,
     )
+
+
+def _offered_skills(public_skills: list[str] | None) -> Callable[[], list[Skill]]:
+    """Narrow the profile catalog's public tier to the server's ``public_skills``."""
+    if public_skills is None:
+        return discover_profile_skills
+    offered = frozenset(public_skills)
+
+    def skills() -> list[Skill]:
+        public_tier = discover_public_skill_names()
+        return [
+            skill
+            for skill in discover_profile_skills()
+            if skill.name in offered or skill.name not in public_tier
+        ]
+
+    return skills
 
 
 def live_launch_runtime(
