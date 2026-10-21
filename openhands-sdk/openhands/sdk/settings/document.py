@@ -28,6 +28,10 @@ from .model import (
 
 SETTINGS_DOCUMENT_SCHEMA_VERSION = 1
 
+type JsonValue = (
+    str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+)
+
 
 def _field_metadata(
     prominence: SettingProminence = SettingProminence.MINOR,
@@ -41,6 +45,8 @@ class ProductSettings(BaseModel):
     """Frontend/product preferences that do not alter agent execution."""
 
     model_config = ConfigDict(extra="allow")
+
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
 
     language: str = Field(
         default="en",
@@ -87,7 +93,7 @@ class ProductSettings(BaseModel):
         description="Route the initial task through the active model router.",
         json_schema_extra=_field_metadata(SettingProminence.MAJOR),
     )
-    workspace_file_discovery: dict[str, Any] = Field(
+    workspace_file_discovery: dict[str, JsonValue] = Field(
         default_factory=dict,
         description="Per-workspace file discovery preferences.",
         json_schema_extra=_field_metadata(),
@@ -113,7 +119,7 @@ class LLMProfileDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    settings: dict[str, Any] = Field(default_factory=dict)
+    settings: dict[str, JsonValue] = Field(default_factory=dict)
     secret_references: dict[str, SettingsSecretReference] = Field(default_factory=dict)
 
 
@@ -185,7 +191,7 @@ class ProductSettingsPatch(BaseModel):
     disabled_skills: list[str] | None = None
     enabled_skills: list[str] | None = None
     run_router_at_conversation_start: bool | None = None
-    workspace_file_discovery: dict[str, Any] | None = None
+    workspace_file_discovery: dict[str, JsonValue] | None = None
     default_profile_migrated: bool | None = None
 
 
@@ -198,8 +204,8 @@ class SettingsDocumentPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    agent: dict[str, Any] | None = None
-    conversation: dict[str, Any] | None = None
+    agent: dict[str, JsonValue] | None = None
+    conversation: dict[str, JsonValue] | None = None
     product: ProductSettingsPatch | None = None
     resources: SettingsResourcesPatch | None = None
 
