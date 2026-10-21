@@ -135,6 +135,63 @@ def test_get_conversation_settings_schema():
     assert "security_analyzer" in verification_field_keys
 
 
+def test_get_settings_document_schema():
+    client = TestClient(create_app(Config(static_files_path=None, session_api_keys=[])))
+
+    response = client.get("/api/settings/document-schema")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model_name"] == "SettingsDocument"
+    section_keys = {section["key"] for section in body["sections"]}
+    assert "agent.llm" in section_keys
+    assert "conversation.general" in section_keys
+    assert "product.general" in section_keys
+    assert "resources" in section_keys
+
+
+def test_get_settings_document_replaces_secrets_with_references(client_with_settings):
+    update_response = client_with_settings.patch(
+        "/api/settings",
+        json={"agent_settings_diff": {"llm": {"api_key": "sk-document-test"}}},
+    )
+    assert update_response.status_code == 200
+
+    response = client_with_settings.get("/api/settings/document")
+
+    assert response.status_code == 200
+    body = response.json()
+    serialized = json.dumps(body)
+    assert "sk-document-test" not in serialized
+    assert body["schema_version"] == 1
+    assert body["product"]["language"] == "en"
+    assert body["agent"]["llm"]["api_key"] is None
+    reference = body["resources"]["credentials"]["agent.llm.api_key"]
+    assert reference == {
+        "ref": "settings:agent.llm.api_key",
+        "is_set": True,
+    }
+
+
+def test_patch_settings_document_persists_transparent_sections(client_with_settings):
+    response = client_with_settings.patch(
+        "/api/settings/document",
+        json={
+            "conversation": {"max_iterations": 41},
+            "product": {"language": "fr"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["conversation"]["max_iterations"] == 41
+    assert body["product"]["language"] == "fr"
+
+    persisted = client_with_settings.get("/api/settings/document").json()
+    assert persisted["conversation"]["max_iterations"] == 41
+    assert persisted["product"]["language"] == "fr"
+
+
 # ── GET /api/settings tests ─────────────────────────────────────────────
 
 

@@ -30,6 +30,21 @@ from .metadata import (
 
 if TYPE_CHECKING:
     from .acp_providers import ACPModelOption
+    from .document import (
+        SETTINGS_DOCUMENT_SCHEMA_VERSION,
+        LLMProfileDocument,
+        ProductSettings,
+        ProductSettingsPatch,
+        ProviderConnectionDocument,
+        SettingsDocument,
+        SettingsDocumentPatch,
+        SettingsProfilePointers,
+        SettingsProfilePointersPatch,
+        SettingsResources,
+        SettingsResourcesPatch,
+        SettingsSecretReference,
+        export_settings_document_schema,
+    )
     from .model import (
         AGENT_SETTINGS_SCHEMA_VERSION,
         CONVERSATION_SETTINGS_SCHEMA_VERSION,
@@ -82,6 +97,23 @@ _MODEL_EXPORTS = {
     "validate_agent_settings",
 }
 
+_DOCUMENT_EXPORTS = {
+    "SETTINGS_DOCUMENT_SCHEMA_VERSION",
+    "LLMProfileDocument",
+    "ProductSettings",
+    "ProductSettingsPatch",
+    "ProviderConnectionDocument",
+    "SettingsDocument",
+    "SettingsDocumentPatch",
+    "SettingsProfilePointers",
+    "SettingsProfilePointersPatch",
+    "SettingsResources",
+    "SettingsResourcesPatch",
+    "SettingsSecretReference",
+    "export_settings_document_schema",
+}
+
+
 __all__ = [
     "ACP_PROVIDERS",
     "ACPFileSecretSpec",
@@ -101,13 +133,25 @@ __all__ = [
     "LLMSummarizingCondenserSettings",
     "NoOpCondenserSettings",
     "OpenHandsAgentSettings",
+    "SETTINGS_DOCUMENT_SCHEMA_VERSION",
     "SETTINGS_METADATA_KEY",
     "SETTINGS_SECTION_METADATA_KEY",
     # API models for settings endpoints
+    "LLMProfileDocument",
+    "ProductSettings",
+    "ProductSettingsPatch",
+    "ProviderConnectionDocument",
     "SecretCreateRequest",
     "SecretItemResponse",
     "SecretsListResponse",
     "SettingProminence",
+    "SettingsDocument",
+    "SettingsDocumentPatch",
+    "SettingsProfilePointers",
+    "SettingsProfilePointersPatch",
+    "SettingsResources",
+    "SettingsResourcesPatch",
+    "SettingsSecretReference",
     "SettingsChoice",
     "SettingsFieldMetadata",
     "SettingsFieldSchema",
@@ -122,6 +166,7 @@ __all__ = [
     "default_agent_settings",
     "detect_acp_provider_by_agent_name",
     "export_agent_settings_schema",
+    "export_settings_document_schema",
     "export_settings_schema",
     "field_meta",
     "get_acp_provider",
@@ -138,4 +183,8 @@ def __getattr__(name: str) -> Any:
         from . import model
 
         return getattr(model, name)
+    if name in _DOCUMENT_EXPORTS:
+        from . import document
+
+        return getattr(document, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
