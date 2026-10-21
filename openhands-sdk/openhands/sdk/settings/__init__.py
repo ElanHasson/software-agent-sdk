@@ -184,7 +184,35 @@ def __getattr__(name: str) -> Any:
 
         return getattr(model, name)
     if name in _DOCUMENT_EXPORTS:
-        from . import document
+        from .document import (
+            SETTINGS_DOCUMENT_SCHEMA_VERSION,
+            LLMProfileDocument,
+            ProductSettings,
+            ProductSettingsPatch,
+            ProviderConnectionDocument,
+            SettingsDocument,
+            SettingsDocumentPatch,
+            SettingsProfilePointers,
+            SettingsProfilePointersPatch,
+            SettingsResources,
+            SettingsResourcesPatch,
+            SettingsSecretReference,
+            export_settings_document_schema,
+        )
 
-        return getattr(document, name)
+        return {
+            "SETTINGS_DOCUMENT_SCHEMA_VERSION": SETTINGS_DOCUMENT_SCHEMA_VERSION,
+            "LLMProfileDocument": LLMProfileDocument,
+            "ProductSettings": ProductSettings,
+            "ProductSettingsPatch": ProductSettingsPatch,
+            "ProviderConnectionDocument": ProviderConnectionDocument,
+            "SettingsDocument": SettingsDocument,
+            "SettingsDocumentPatch": SettingsDocumentPatch,
+            "SettingsProfilePointers": SettingsProfilePointers,
+            "SettingsProfilePointersPatch": SettingsProfilePointersPatch,
+            "SettingsResources": SettingsResources,
+            "SettingsResourcesPatch": SettingsResourcesPatch,
+            "SettingsSecretReference": SettingsSecretReference,
+            "export_settings_document_schema": export_settings_document_schema,
+        }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
