@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -869,7 +870,9 @@ def _app_request(client) -> Request:
     return Request({"type": "http", "app": client.app})
 
 
-async def _stream_trajectory(response: FileResponse) -> bytes:
+async def _stream_trajectory(
+    response: FileResponse, error: BaseException | None = None
+) -> bytes:
     chunks: list[bytes] = []
 
     async def receive() -> Message:
@@ -877,6 +880,8 @@ async def _stream_trajectory(response: FileResponse) -> bytes:
 
     async def send(message: Message) -> None:
         if message["type"] == "http.response.body":
+            if error is not None:
+                raise error
             chunks.append(message["body"])
 
     await response(
@@ -956,6 +961,57 @@ async def test_download_trajectory_removes_temp_zip_when_zipping_fails(
         await file_router_module.download_trajectory(
             conversation_id, _app_request(client)
         )
+    assert list(conversation_dir.parent.glob("*.zip")) == []
+
+
+async def test_download_trajectory_cancellation_joins_zip_worker(
+    client, monkeypatch, tmp_path
+):
+    conversation_id, conversation_dir = _trajectory_dir(client, tmp_path)
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    release = threading.Event()
+    create_zip = file_router_module._create_zip_from_directory
+
+    def blocked_zip(source, destination):
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(timeout=10)
+            create_zip(source, destination)
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(file_router_module, "_create_zip_from_directory", blocked_zip)
+    task = asyncio.create_task(
+        file_router_module.download_trajectory(conversation_id, _app_request(client))
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        assert list(conversation_dir.parent.glob("*.zip")) == []
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=5)
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("send failed"), asyncio.CancelledError()]
+)
+async def test_download_trajectory_cleans_up_after_stream_failure(
+    client, tmp_path, error
+):
+    conversation_id, conversation_dir = _trajectory_dir(client, tmp_path)
+    response = await file_router_module.download_trajectory(
+        conversation_id, _app_request(client)
+    )
+    with pytest.raises(type(error)):
+        await _stream_trajectory(response, error)
     assert list(conversation_dir.parent.glob("*.zip")) == []
 
 
