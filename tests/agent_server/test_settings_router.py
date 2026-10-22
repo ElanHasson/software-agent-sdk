@@ -150,6 +150,68 @@ def test_get_settings_document_schema():
     assert "resources" in section_keys
 
 
+def test_register_settings_document_field_refreshes_schema_and_persists_value(
+    client_with_settings, temp_persistence_dir, monkeypatch
+):
+    overlay_path = temp_persistence_dir / "settings-schema-overlay.json"
+    monkeypatch.setenv("OH_SETTINGS_SCHEMA_OVERLAY", str(overlay_path))
+
+    registration = client_with_settings.put(
+        "/api/settings/document-schema/fields",
+        json={
+            "key": "product.browser_previews",
+            "label": "Browser previews",
+            "description": "Open a live preview when an application starts.",
+            "section": "product.prototype",
+            "section_label": "Prototype settings",
+            "value_type": "boolean",
+            "default": True,
+            "prominence": "major",
+        },
+    )
+
+    assert registration.status_code == 200
+    schema = client_with_settings.get("/api/settings/document-schema").json()
+    prototype_section = next(
+        section
+        for section in schema["sections"]
+        if section["key"] == "product.prototype"
+    )
+    assert [field["key"] for field in prototype_section["fields"]] == [
+        "product.browser_previews"
+    ]
+
+    update = client_with_settings.patch(
+        "/api/settings/document",
+        json={"product": {"browser_previews": False}},
+    )
+
+    assert update.status_code == 200
+    assert update.json()["product"]["browser_previews"] is False
+    persisted = client_with_settings.get("/api/settings/document").json()
+    assert persisted["product"]["browser_previews"] is False
+
+
+def test_register_settings_document_field_requires_overlay_configuration(
+    client_with_settings, monkeypatch
+):
+    monkeypatch.delenv("OH_SETTINGS_SCHEMA_OVERLAY", raising=False)
+
+    response = client_with_settings.put(
+        "/api/settings/document-schema/fields",
+        json={
+            "key": "product.browser_previews",
+            "label": "Browser previews",
+            "section": "product.prototype",
+            "section_label": "Prototype settings",
+            "value_type": "boolean",
+            "default": True,
+        },
+    )
+
+    assert response.status_code == 404
+
+
 def test_get_settings_document_replaces_secrets_with_references(client_with_settings):
     update_response = client_with_settings.patch(
         "/api/settings",

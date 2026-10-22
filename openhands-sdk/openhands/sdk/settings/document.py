@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +34,59 @@ SETTINGS_DOCUMENT_SCHEMA_VERSION = 1
 type JsonValue = (
     str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 )
+
+SETTINGS_SCHEMA_OVERLAY_ENV = "OH_SETTINGS_SCHEMA_OVERLAY"
+
+
+def _settings_schema_overlay_path() -> Path | None:
+    value = os.getenv(SETTINGS_SCHEMA_OVERLAY_ENV)
+    return Path(value).expanduser() if value else None
+
+
+def _load_settings_schema_overlay() -> list[SettingsFieldSchema]:
+    path = _settings_schema_overlay_path()
+    if path is None or not path.exists():
+        return []
+    payload = json.loads(path.read_text())
+    if not isinstance(payload, list):
+        raise ValueError("Settings schema overlay must contain a JSON array")
+    return [SettingsFieldSchema.model_validate(field) for field in payload]
+
+
+def register_settings_document_field(
+    field: SettingsFieldSchema,
+) -> SettingsSchema:
+    """Upsert a prototype product field in the configured schema overlay."""
+    path = _settings_schema_overlay_path()
+    if path is None:
+        raise RuntimeError(f"{SETTINGS_SCHEMA_OVERLAY_ENV} is not configured")
+    if not field.key.startswith("product.") or not field.section.startswith("product."):
+        raise ValueError("Prototype fields must use the product namespace")
+    if field.secret:
+        raise ValueError("Secret fields must use the dedicated secrets API")
+
+    built_in_keys = {
+        candidate.key
+        for section in _base_settings_document_schema().sections
+        for candidate in section.fields
+    }
+    if field.key in built_in_keys:
+        raise ValueError(f"Cannot replace built-in settings field: {field.key}")
+
+    fields = _load_settings_schema_overlay()
+    fields_by_key = {candidate.key: candidate for candidate in fields}
+    fields_by_key[field.key] = field
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(
+        json.dumps(
+            [candidate.model_dump(mode="json") for candidate in fields_by_key.values()],
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    temporary_path.replace(path)
+    return export_settings_document_schema()
 
 
 def _field_metadata(
@@ -180,7 +236,9 @@ class SettingsResourcesPatch(BaseModel):
 class ProductSettingsPatch(BaseModel):
     """Sparse product-preference patch."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
+
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
 
     language: str | None = None
     user_consents_to_analytics: bool | None = None
@@ -259,9 +317,7 @@ def _resource_field(key: str, label: str, value_type: Literal["array", "object"]
     )
 
 
-def export_settings_document_schema() -> SettingsSchema:
-    """Export one renderer schema for all transparent document values."""
-
+def _base_settings_document_schema() -> SettingsSchema:
     sections = _prefix_schema(export_agent_settings_schema(), "agent")
     sections.extend(
         _prefix_schema(ConversationSettings.export_schema(), "conversation")
@@ -285,3 +341,33 @@ def export_settings_document_schema() -> SettingsSchema:
         )
     )
     return SettingsSchema(model_name="SettingsDocument", sections=sections)
+
+
+def export_settings_document_schema() -> SettingsSchema:
+    """Export the canonical renderer schema with configured prototype fields."""
+    schema = _base_settings_document_schema()
+    overlay_fields = _load_settings_schema_overlay()
+    if not overlay_fields:
+        return schema
+
+    sections = list(schema.sections)
+    section_indexes = {section.key: index for index, section in enumerate(sections)}
+    for field in overlay_fields:
+        section_index = section_indexes.get(field.section)
+        if section_index is None:
+            section_indexes[field.section] = len(sections)
+            sections.append(
+                SettingsSectionSchema(
+                    key=field.section,
+                    label=field.section_label,
+                    fields=[field],
+                )
+            )
+            continue
+        section = sections[section_index]
+        fields = [
+            candidate for candidate in section.fields if candidate.key != field.key
+        ]
+        fields.append(field)
+        sections[section_index] = section.model_copy(update={"fields": fields})
+    return schema.model_copy(update={"sections": sections})

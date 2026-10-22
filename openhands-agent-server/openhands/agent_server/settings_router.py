@@ -38,6 +38,7 @@ from openhands.sdk.settings import (
     SecretsListResponse,
     SettingsDocument,
     SettingsDocumentPatch,
+    SettingsFieldSchema,
     SettingsProfilePointers,
     SettingsResources,
     SettingsResponse,
@@ -46,6 +47,7 @@ from openhands.sdk.settings import (
     SettingsUpdateRequest,
     export_agent_settings_schema,
     export_settings_document_schema,
+    register_settings_document_field,
     validate_agent_settings,
 )
 from openhands.sdk.settings.api_models import MCPServerPatch
@@ -88,7 +90,6 @@ def _get_conversation_settings_schema() -> SettingsSchema:
     return ConversationSettings.export_schema()
 
 
-@lru_cache(maxsize=1)
 def _get_settings_document_schema() -> SettingsSchema:
     return export_settings_document_schema()
 
@@ -109,6 +110,27 @@ async def get_conversation_settings_schema() -> SettingsSchema:
 async def get_settings_document_schema() -> SettingsSchema:
     """Return one renderer schema for the canonical settings document."""
     return _get_settings_document_schema()
+
+
+@settings_router.put(
+    f"{SETTINGS_DOCUMENT_SCHEMA_PATH}/fields",
+    response_model=SettingsSchema,
+)
+async def put_settings_document_schema_field(
+    field: SettingsFieldSchema,
+) -> SettingsSchema:
+    """Upsert a prototype field when a shared schema overlay is configured."""
+    try:
+        return register_settings_document_field(field)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
 
 # ── Settings CRUD Endpoints ──────────────────────────────────────────────

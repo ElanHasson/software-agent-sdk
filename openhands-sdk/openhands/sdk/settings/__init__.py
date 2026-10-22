@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         SettingsResourcesPatch,
         SettingsSecretReference,
         export_settings_document_schema,
+        register_settings_document_field,
     )
     from .model import (
         AGENT_SETTINGS_SCHEMA_VERSION,
@@ -111,6 +112,7 @@ _DOCUMENT_EXPORTS = {
     "SettingsResourcesPatch",
     "SettingsSecretReference",
     "export_settings_document_schema",
+    "register_settings_document_field",
 }
 
 
@@ -168,6 +170,7 @@ __all__ = [
     "export_agent_settings_schema",
     "export_settings_document_schema",
     "export_settings_schema",
+    "register_settings_document_field",
     "field_meta",
     "get_acp_provider",
     "validate_agent_settings",
@@ -198,6 +201,7 @@ def __getattr__(name: str) -> Any:
             SettingsResourcesPatch,
             SettingsSecretReference,
             export_settings_document_schema,
+            register_settings_document_field,
         )
 
         return {
@@ -214,5 +218,6 @@ def __getattr__(name: str) -> Any:
             "SettingsResourcesPatch": SettingsResourcesPatch,
             "SettingsSecretReference": SettingsSecretReference,
             "export_settings_document_schema": export_settings_document_schema,
+            "register_settings_document_field": register_settings_document_field,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
