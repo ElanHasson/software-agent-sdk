@@ -20,6 +20,9 @@ persist it through the settings API under the tested server's ``auth.state``.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
 import threading
 import time
 import uuid
@@ -32,10 +35,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastmcp.client.auth.oauth import ClientNotFoundError, OAuth
 from pydantic import BaseModel, Field, model_validator
 
-from openhands.agent_server._secrets_exposure import get_cipher
+from openhands.agent_server._secrets_exposure import get_cipher, get_config
 from openhands.agent_server.mcp_oauth_store import (
     InMemoryMCPOAuthTokenStore,
 )
+from openhands.agent_server.persistence import get_secrets_store
 from openhands.sdk.logger import get_logger
 from openhands.sdk.mcp import create_mcp_tools
 from openhands.sdk.mcp.client import MCPClient
@@ -45,10 +49,13 @@ from openhands.sdk.mcp.config import (
     MCPOAuthAuthentication,
     MCPOAuthStateResponse,
     MCPServer,
+    dump_mcp_config,
 )
 from openhands.sdk.mcp.exceptions import MCPError, MCPTimeoutError
 from openhands.sdk.mcp.oauth import MCPOAuth
+from openhands.sdk.skills.utils import SecretLookup, expand_mcp_servers
 from openhands.sdk.utils.cipher import Cipher
+from openhands.sdk.utils.pydantic_secrets import REDACTED_SECRET_VALUE
 
 
 logger = get_logger(__name__)
@@ -526,16 +533,19 @@ def _probe_mcp_server(
     request: MCPTestRequest,
     cipher: Cipher | None,
     mcp_oauth_factory: Any | None = None,
+    mcp_config: dict[str, MCPServer] | None = None,
 ) -> MCPTestResponse:
     """Synchronous probe -- safe to run inside ``run_in_executor``.
 
     ``create_mcp_tools`` already runs its own event loop in a background
     thread via ``MCPClient.call_async_from_sync``. We deliberately do not
     call it from the FastAPI request task; instead the caller hops into a
-    threadpool first.
+    threadpool first. ``mcp_config`` replaces the request's own (decrypted)
+    config, e.g. with its secret references expanded.
     """
 
-    mcp_config = request.to_mcp_config(cipher=cipher)
+    if mcp_config is None:
+        mcp_config = request.to_mcp_config(cipher=cipher)
 
     try:
         server = request.resolved_server
@@ -605,6 +615,83 @@ def _probe_mcp_server(
         )
 
 
+# A reference the expansion left in place: no secret, variable or default
+# supplied a value for it.
+_UNRESOLVED_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_secret_references(
+    mcp_config: dict[str, MCPServer], get_secret: SecretLookup
+) -> tuple[dict[str, MCPServer], set[str], list[str]]:
+    """Expand ``${NAME}`` references the way a conversation on this server does.
+
+    Returns the expanded config, the values substituted and the names that
+    matched nothing.
+    """
+    values: set[str] = set()
+
+    def lookup(name: str) -> str | None:
+        # Secrets, then this process's environment, as in a conversation; the
+        # environment is checked here too so its values get scrubbed.
+        value = get_secret(name)
+        if value is None:
+            value = os.environ.get(name)
+        if value:
+            values.add(value)
+        return value
+
+    expanded = expand_mcp_servers(mcp_config, lookup)
+    expandable = {name: s for name, s in expanded.items() if not s.literal_values}
+    unresolved = _UNRESOLVED_REFERENCE.findall(json.dumps(dump_mcp_config(expandable)))
+    return expanded, values, sorted(set(unresolved))
+
+
+def _scrub_values(response: MCPTestResponse, values: set[str]) -> MCPTestResponse:
+    """Mask substituted values, which the caller never supplied, in its text."""
+
+    def scrub(text: str) -> str:
+        for value in sorted(values, key=len, reverse=True):
+            text = text.replace(value, REDACTED_SECRET_VALUE)
+        return text
+
+    if isinstance(response, MCPTestFailure):
+        return response.model_copy(update={"error": scrub(response.error)})
+    if response.tool_result is not None:
+        tool_result = response.tool_result.model_copy(
+            update={"text": scrub(response.tool_result.text)}
+        )
+        return response.model_copy(update={"tool_result": tool_result})
+    return response
+
+
+def _probe_with_secret_references(
+    request: MCPTestRequest, cipher: Cipher | None, get_secret: SecretLookup
+) -> MCPTestResponse:
+    """``_probe_mcp_server`` with the config's ``${NAME}`` references expanded.
+
+    OAuth servers are probed as configured: the OAuth client copies a
+    configured client secret into the state returned for the caller to save.
+    """
+    if request.resolved_server.oauth_auth is not None:
+        return _probe_mcp_server(request, cipher)
+    mcp_config, values, unresolved = _expand_secret_references(
+        request.to_mcp_config(cipher=cipher), get_secret
+    )
+    if unresolved:
+        # Bare names: settings UIs mask the typed credential, here the
+        # ``${NAME}`` reference itself, wherever it appears in the error.
+        return MCPTestFailure(
+            error=(
+                f"No secret named {', '.join(unresolved)} is set. Add it on the "
+                "Secrets page or correct the reference."
+            ),
+            error_kind="unknown",
+        )
+    return _scrub_values(
+        _probe_mcp_server(request, cipher, mcp_config=mcp_config), values
+    )
+
+
 @mcp_router.post(
     "/test",
     response_model=MCPTestResponse,
@@ -620,8 +707,11 @@ def _probe_mcp_server(
         "`tool_call` and reports its outcome in `tool_result`, so callers "
         "can verify credentials that are only exercised on tool invocation. "
         "Encrypted `env`/`headers` values round-tripped from settings are "
-        "decrypted before the connection is attempted. "
+        "decrypted before the connection is attempted, and `${NAME}` "
+        "references are expanded from the saved secrets and the server's "
+        "environment as in a conversation (OAuth servers excepted). "
         "Returns 200 with `ok=false` for connection / timeout failures "
+        "and for references that match nothing "
         "(those are expected during validation, not server errors)."
     ),
 )
@@ -629,11 +719,18 @@ async def test_mcp_server(
     request: MCPTestRequest, http_request: Request
 ) -> MCPTestResponse:
     """Probe a single MCP server config and report whether it works."""
-    # Resolve the cipher here: the threadpool function below must not
-    # reach back into ``http_request.app.state``.
+    # Resolve the cipher and store here: the threadpool function below must
+    # not reach back into ``http_request.app.state``.
     cipher = get_cipher(http_request)
+    secrets_store = get_secrets_store(get_config(http_request))
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _probe_mcp_server, request, cipher)
+    return await loop.run_in_executor(
+        None,
+        _probe_with_secret_references,
+        request,
+        cipher,
+        secrets_store.get_secret,
+    )
 
 
 def _run_oauth_probe_job(job: _MCPOAuthProbeJob) -> None:

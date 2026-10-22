@@ -18,14 +18,17 @@ from openhands.agent_server.config import Config
 from openhands.agent_server.mcp_router import (
     _OAUTH_PROBE_JOB_TTL_SECONDS,
     MCPTestRequest,
+    MCPTestSuccess,
     _BrowserCoordinatedOAuth,
     _MCPOAuthProbeJob,
     _oauth_probe_jobs,
     _oauth_probe_jobs_lock,
+    _probe_with_secret_references,
     _register_oauth_job,
 )
-from openhands.agent_server.persistence import reset_stores
+from openhands.agent_server.persistence import get_secrets_store, reset_stores
 from openhands.sdk.mcp.config import MCPServer, to_fastmcp_mcp_config
+from openhands.sdk.utils.pydantic_secrets import REDACTED_SECRET_VALUE
 
 # Reuse the real FastMCP-based test-server helper from the SDK tests; spinning
 # up a real subprocess MCP server inside a unit test is unreliable across CI
@@ -361,6 +364,173 @@ def test_mcp_test_decrypts_encrypted_remote_auth_before_connect(
             }
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# ${NAME} secret references
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_test_expands_remote_secret_reference_from_saved_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A remote server saved with ``Bearer ${NAME}`` connects with the saved
+    secret, as a conversation would, instead of sending the placeholder."""
+    config = Config(session_api_keys=[])
+    get_secrets_store(config).set_secret("SONAR_TOKEN", "sonar-saved-token")
+    client = TestClient(create_app(config), raise_server_exceptions=False)
+    seen_configs: list[dict[str, MCPServer]] = []
+
+    class FakeClient:
+        def __init__(self):
+            self.tools: list[object] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    def fake_create_mcp_tools(config, timeout=30.0, *, mcp_oauth_token_storage=None):
+        seen_configs.append(config)
+        return FakeClient()
+
+    monkeypatch.setattr(
+        "openhands.agent_server.mcp_router.create_mcp_tools", fake_create_mcp_tools
+    )
+
+    response = client.post(
+        "/api/mcp/test",
+        json={
+            "name": "sonar",
+            "server": {
+                "transport": "http",
+                "url": "https://sonar.example/mcp",
+                "auth": {"strategy": "bearer", "value": "${SONAR_TOKEN}"},
+            },
+            "timeout": 10.0,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    [seen] = seen_configs
+    assert to_fastmcp_mcp_config(seen)["mcpServers"]["sonar"]["auth"] == (
+        "sonar-saved-token"
+    )
+
+
+def test_mcp_test_expands_references_like_a_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Saved secrets, then the environment, then ``:-`` defaults; substituted
+    values are masked in the returned tool output."""
+    config = Config(session_api_keys=[])
+    get_secrets_store(config).set_secret("HF_BOT_TOKEN", "xoxb-saved-secret")
+    monkeypatch.setenv("HF_TEAM_ID", "T0123")
+    monkeypatch.delenv("HF_CHANNEL", raising=False)
+    client = TestClient(create_app(config), raise_server_exceptions=False)
+    script = (
+        "import json, os\n"
+        "from fastmcp import FastMCP\n"
+        "mcp = FastMCP('env-echo')\n"
+        "@mcp.tool()\n"
+        "def read_env() -> str:\n"
+        "    token = os.environ.get('SLACK_BOT_TOKEN')\n"
+        "    return json.dumps({\n"
+        "        'bot_token': token,\n"
+        "        'bot_token_ok': token == 'xoxb-saved-secret',\n"
+        "        'team_id_ok': os.environ.get('SLACK_TEAM_ID') == 'T0123',\n"
+        "        'channel': os.environ.get('SLACK_CHANNEL'),\n"
+        "    })\n"
+        "mcp.run()\n"
+    )
+
+    response = client.post(
+        "/api/mcp/test",
+        json={
+            "name": "env-echo",
+            "server": {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": ["-c", script],
+                "env": {
+                    "SLACK_BOT_TOKEN": "${HF_BOT_TOKEN}",
+                    "SLACK_TEAM_ID": "${HF_TEAM_ID}",
+                    "SLACK_CHANNEL": "${HF_CHANNEL:-general}",
+                },
+            },
+            "timeout": 20.0,
+            "tool_call": {"name": "read_env"},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True, body
+    assert json.loads(body["tool_result"]["text"]) == {
+        "bot_token": REDACTED_SECRET_VALUE,
+        "bot_token_ok": True,
+        "team_id_ok": True,
+        "channel": "general",
+    }
+
+
+def test_mcp_test_names_an_unset_secret_reference(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("HF_MISSING_TOKEN", raising=False)
+
+    response = client.post(
+        "/api/mcp/test",
+        json={
+            "server": {
+                "transport": "http",
+                "url": "http://127.0.0.1:9/mcp",
+                "headers": {"Authorization": "Bearer ${HF_MISSING_TOKEN}"},
+            },
+            "timeout": 5.0,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is False
+    assert "HF_MISSING_TOKEN" in body["error"]
+    # Settings UIs mask the typed credential, i.e. the reference itself.
+    assert "${HF_MISSING_TOKEN}" not in body["error"]
+
+
+def test_mcp_test_probes_oauth_servers_as_configured(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The OAuth client copies a configured client secret into the state the
+    caller saves, so references on OAuth servers are not expanded."""
+    probed_configs: list[object] = []
+
+    def fake_probe(request, cipher, mcp_oauth_factory=None, mcp_config=None):
+        probed_configs.append(mcp_config)
+        return MCPTestSuccess(tools=[])
+
+    monkeypatch.setattr(
+        "openhands.agent_server.mcp_router._probe_mcp_server", fake_probe
+    )
+    looked_up: list[str] = []
+    request = MCPTestRequest.model_validate(
+        {
+            "server": {
+                "transport": "http",
+                "url": "https://mcp.example/mcp",
+                "headers": {"X-Team": "${HF_TEAM}"},
+                "auth": {"strategy": "oauth2"},
+            }
+        }
+    )
+
+    _probe_with_secret_references(request, None, looked_up.append)
+
+    assert probed_configs == [None]
+    assert looked_up == []
 
 
 # ---------------------------------------------------------------------------
