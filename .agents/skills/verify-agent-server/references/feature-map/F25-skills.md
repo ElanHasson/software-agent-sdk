@@ -36,14 +36,14 @@ Routes: `POST /api/skills`, `POST /api/skills/sync`, `POST /api/skills/install`,
 - `F25.enable-disable`: `PATCH {"enabled": false}` keeps the files but hides the skill from the catalog, `{"enabled": true}` restores it, and a body without `enabled` is 422.
 - `F25.install-conflict`: re-installing an installed skill is 409 and changes nothing; `force: true` reinstalls it and keeps the disabled flag.
 - `F25.install-errors`: an unfetchable source (missing path, unparsable source, escaping `repo_path`) is 400, an invalid skill (no SKILL.md, name mismatch, invalid directory name) is 422, an empty source is 422, and nothing is installed.
-- `F25.install-bad-frontmatter`: a SKILL.md with malformed YAML frontmatter is rejected as an invalid skill (422); today it is a 500.
+- `F25.install-bad-frontmatter`: a SKILL.md with malformed YAML frontmatter is rejected as an invalid skill (422) and nothing is installed.
 - `F25.install-git`: a `file://` git source with `repo_path` installs offline and records the source, `repo_path` and the resolved commit SHA.
 - `F25.sdk-load-skills`: `RemoteWorkspace.load_skills_from_agent_server()` turns the merged catalog of its `working_dir` into SDK `Skill` objects (project, user and enabled installed skills, keyword triggers kept) and an `AgentContext` that does not reload public skills.
 - `F25.install-github`: the working GitHub form (`github:OpenHands/extensions` plus `repo_path`) installs a public skill from github.com at a full commit SHA, and uninstalling it removes it.
 - `F25.install-documented-sources`: every GitHub source form the OpenAPI description of `InstallSkillRequest.source` advertises installs, including the `github:owner/repo/<path>` shorthand.
 - `F25.refresh`: refresh re-fetches from the recorded source: a new commit in the git source updates `resolved_ref` and the installed files, an edited local source updates the description, and the enabled flag is preserved.
 - `F25.install-ref`: installing a git source with `ref` pins that commit (`resolved_ref`, the installed files, `requested_ref` in `.installed.json`); refresh moves it to the source's latest commit and drops `requested_ref`.
-- `F25.install-unknown-ref`: a `ref` the git source does not have is 400 and leaves the installation unchanged, both on a first clone and when the source's clone is already cached.
+- `F25.install-unknown-ref`: a `ref` the git source does not have is 400 and leaves the installation unchanged for both a first clone and a cached source.
 - `F25.refresh-unfetchable`: refreshing a skill whose recorded source no longer exists is a client error and keeps the installation; today it is a 500.
 - `F25.name-errors`: an unknown skill name is 404 and a name outside `^[a-z0-9]+(-[a-z0-9]+)*$` is 422 on get, enable/disable, uninstall and refresh.
 - `F25.self-heal`: a skill directory copied into the store by hand is invisible to the single view until the list call discovers it with source `local`; a tracked directory removed by hand is pruned from the metadata by the list call.
@@ -337,17 +337,17 @@ Preconditions:
   Fetch failures are `400 Failed to fetch skill source...`, invalid skills
   `422 Invalid skill. Ensure the source contains a valid SKILL.md.`, and the
   store still holds only `qa-f25-skill`.
-- **Malformed frontmatter (`F25.install-bad-frontmatter`), known bug.**
+- **Malformed frontmatter (`F25.install-bad-frontmatter`).**
   Install a SKILL.md whose YAML does not parse.
   ```sh
   control-agent-server api POST /api/skills/install --json '{"source": "'"$F/qa-f25-badyaml"'"}' --expect 422 \
-    --save F25.install-bad-frontmatter/install  # bug: status eq 500 && response.body.exception contains 'while parsing'
+    --save F25.install-bad-frontmatter/install
   test ! -e "$I/qa-f25-badyaml"
   ```
-  An unparsable skill should be the documented 422 like the other invalid
-  skills. Today it is `500 Internal Server Error` (with the YAML parser
-  message): `Skill.load` lets `yaml` errors escape instead of raising
-  `SkillValidationError`, and the route maps only that.
+  An unparsable skill is the documented
+  `422 Invalid skill. Ensure the source contains a valid SKILL.md.`, like the
+  other invalid skills: the install loader turns the YAML error into
+  `SkillValidationError`, and nothing is copied into the store.
 - **Install from a git source (`F25.install-git`).** Install the skill
   directory of the `qa-f25-src` repository through `file://`.
   ```sh
@@ -498,13 +498,11 @@ Preconditions:
   control-agent-server api GET /api/skills/installed/qa-f25-src-skill --expect 200 --check installed_at eq "$T2"
   ```
   The first clone fails (`git clone --branch qa-f25-no-such-ref`), so the
-  install is `400` and nothing is installed (the positive control). The
-  `qa-f25-src` clone is in the extensions cache, and that cached source fails
-  the same way: `400`, and the installed skill keeps its `installed_at`. An
-  explicit `ref` never falls back to the cached checkout
-  (`fetch_with_resolution` passes `strict_ref` to the SDK's cached clone), so
-  a real ref that the cache does not hold yet is also `400` when the fetch
-  fails (offline); a fetch without `ref` still uses the stale cache.
+  install is `400` and nothing is installed. The `qa-f25-src` clone is in the
+  extensions cache; it also returns `400` and keeps the installed copy at
+  `H2`, with its prior `installed_at` value. A valid ref that is not in the
+  cache is fetched before checkout. If that fetch fails, the install returns
+  `400` and keeps the prior installation.
 - **Refresh of a vanished source (`F25.refresh-unfetchable`), known bug.**
   Install from a temporary directory, delete it, refresh.
   ```sh
@@ -883,8 +881,8 @@ Preconditions:
   git install still clones. `version` is always `1.0.0` (the frontmatter
   `version` is not read). Refresh reinstalls with `ref` dropped, so a skill
   installed at a tag moves to the default branch (`F25.install-ref`). A
-  `ref` that cannot be checked out is 400 whether or not the source's clone
-  is cached (`F25.install-unknown-ref`).
+  `ref` that cannot be checked out in an already cached clone returns a client
+  error and leaves the installed skill unchanged (`F25.install-unknown-ref`).
 - Only the list call and `PATCH` reconcile `.installed.json` with the disk;
   the single view, `DELETE` and refresh do not, so call order matters for hand
   edits (`F25.self-heal`).
