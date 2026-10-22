@@ -1978,6 +1978,7 @@ class ACPAgent(AgentBase):
     _installed_suffix: str | None = PrivateAttr(default=None)
     # Skills written to disk and listed by path in the prompt, not inlined.
     _skill_locations: dict[str, Path] = PrivateAttr(default_factory=dict)
+    _skills_root: Path | None = PrivateAttr(default=None)
     _restart_session_on_next_turn: bool = PrivateAttr(default=False)
     # Stream identity for the turn in flight; see stream_context.py. Held on
     # the agent rather than threaded through the finalizers because the ACP
@@ -2452,14 +2453,19 @@ class ACPAgent(AgentBase):
             )
         )
 
+    def _skill_directories(self) -> list[str] | None:
+        return [str(self._skills_root)] if self._skills_root else None
+
     def _materialize_skills(self, state: ConversationState) -> None:
         self._skill_locations = {}
+        self._skills_root = None
         context = self.agent_context
         if context is None or not context.skills:
             return
         root = self._acp_file_secret_dir(state, "skills")
         shutil.rmtree(root, ignore_errors=True)
         self._skill_locations = write_skill_files(root, context.skills)
+        self._skills_root = root
 
     def _render_suffix(self, state: ConversationState) -> str | None:
         """Render the system suffix once, including secrets from the registry.
@@ -3235,6 +3241,7 @@ class ACPAgent(AgentBase):
                     load_response = await conn.load_session(
                         cwd=working_dir,
                         session_id=prior_session_id,
+                        additional_directories=self._skill_directories(),
                         mcp_servers=acp_mcp_servers,
                     )
                     session_id = prior_session_id
@@ -3280,6 +3287,7 @@ class ACPAgent(AgentBase):
                 session_meta = build_session_model_meta(agent_name, self.acp_model)
                 response = await conn.new_session(
                     cwd=working_dir,
+                    additional_directories=self._skill_directories(),
                     mcp_servers=acp_mcp_servers,
                     **session_meta,
                 )
