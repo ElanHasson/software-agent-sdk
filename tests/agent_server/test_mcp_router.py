@@ -526,6 +526,66 @@ def test_mcp_test_masks_substituted_secrets_in_errors_and_logs(
     assert "MCP test failed unexpectedly" in caplog.text
 
 
+def test_mcp_test_keeps_brace_text_that_expansion_leaves_literal(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``${...}`` text from a secret's value or a default is not a reference
+    the user wrote: like a conversation, pass it on instead of failing."""
+    config = Config(session_api_keys=[])
+    store = get_secrets_store(config)
+    store.set_secret("PASSWORD", "a-${OTHER}-b")
+    store.set_secret("ENDPOINT", "https://h/${path}/mcp")
+    store.set_secret("B", "set")
+    monkeypatch.delenv("A", raising=False)
+    client = TestClient(create_app(config), raise_server_exceptions=False)
+    seen_configs: list[dict[str, MCPServer]] = []
+
+    class FakeClient:
+        def __init__(self):
+            self.tools: list[object] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    def fake_create_mcp_tools(config, timeout=30.0, **kwargs):
+        seen_configs.append(config)
+        return FakeClient()
+
+    monkeypatch.setattr(
+        "openhands.agent_server.mcp_router.create_mcp_tools", fake_create_mcp_tools
+    )
+
+    response = client.post(
+        "/api/mcp/test",
+        json={
+            "name": "braces",
+            "server": {
+                "transport": "http",
+                "url": "https://mcp.example/mcp",
+                "headers": {
+                    "X-Password": "${PASSWORD}",
+                    "X-Endpoint": "${ENDPOINT}",
+                    "X-Nested": "${A:-${B}}",
+                },
+            },
+            "timeout": 5.0,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True, response.json()
+    [seen] = seen_configs
+    headers = to_fastmcp_mcp_config(seen)["mcpServers"]["braces"]["headers"]
+    assert headers == {
+        "X-Password": "a-${OTHER}-b",
+        "X-Endpoint": "https://h/${path}/mcp",
+        "X-Nested": "${B}",
+    }
+
+
 def test_mcp_test_names_an_unset_secret_reference(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):

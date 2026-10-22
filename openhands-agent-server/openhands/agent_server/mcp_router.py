@@ -658,9 +658,9 @@ def _probe_mcp_server(
         )
 
 
-# A reference the expansion left in place: no secret, variable or default
-# supplied a value for it.
-_UNRESOLVED_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The references a conversation expands (``openhands.sdk.skills.utils``): a
+# name and, when given, a ``:-`` default.
+_REFERENCE = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)(:-[^}]*)?\}")
 
 
 def _expand_secret_references(
@@ -668,10 +668,13 @@ def _expand_secret_references(
 ) -> tuple[dict[str, MCPServer], set[str], list[str]]:
     """Expand ``${NAME}`` references the way a conversation on this server does.
 
-    Returns the expanded config, the values substituted and the names that
-    matched nothing.
+    Returns the expanded config, the values substituted and the references
+    without a default that nothing resolved. Only the config as written is
+    searched: ``${...}`` text that a substituted value or default brings in
+    stays literal, as in a conversation.
     """
     values: set[str] = set()
+    resolved: set[str] = set()
 
     def lookup(name: str) -> str | None:
         # Secrets, then this process's environment, as in a conversation; the
@@ -679,14 +682,17 @@ def _expand_secret_references(
         value = get_secret(name)
         if value is None:
             value = os.environ.get(name)
-        if value:
-            values.add(value)
+        if value is not None:
+            resolved.add(name)
+            if value:
+                values.add(value)
         return value
 
+    expandable = {name: s for name, s in mcp_config.items() if not s.literal_values}
+    references = _REFERENCE.findall(json.dumps(dump_mcp_config(expandable)))
+    required = {name for name, default in references if not default}
     expanded = expand_mcp_servers(mcp_config, lookup)
-    expandable = {name: s for name, s in expanded.items() if not s.literal_values}
-    unresolved = _UNRESOLVED_REFERENCE.findall(json.dumps(dump_mcp_config(expandable)))
-    return expanded, values, sorted(set(unresolved))
+    return expanded, values, sorted(required - resolved)
 
 
 def _probe_with_secret_references(
