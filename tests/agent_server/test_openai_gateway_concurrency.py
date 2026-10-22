@@ -23,7 +23,10 @@ class _FakeEventService:
         stats.get_combined_metrics.return_value.accumulated_token_usage = None
         return SimpleNamespace(execution_status=self.status, events=[], stats=stats)
 
-    async def send_message(self, message, run: bool = False) -> None:
+    async def reserve_run_slot(self) -> None:
+        return None
+
+    async def send_message(self, message, run: bool = False, run_slot=None) -> None:
         self.sent.append(message)
         self.status = ConversationExecutionStatus.RUNNING
 
@@ -83,8 +86,9 @@ async def test_overlapping_turn_is_refused_and_first_gets_its_own_answer(gateway
     conversation_id = uuid4()
 
     first = asyncio.create_task(_chat(conversation_service, conversation_id, "X"))
-    while not event_service.sent:
-        await asyncio.sleep(0)
+    async with asyncio.timeout(5):
+        while not event_service.sent:
+            await asyncio.sleep(0)
     # The run X started has finished, but X's request has not seen it yet.
     event_service.status = ConversationExecutionStatus.FINISHED
 
