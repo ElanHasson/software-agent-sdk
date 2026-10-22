@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import time
 from collections.abc import Generator
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -474,6 +476,51 @@ def test_mcp_test_expands_references_like_a_conversation(
         "team_id_ok": True,
         "channel": "general",
     }
+
+
+def _fail_with_expanded_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the probe fail the way httpx does: echoing the (encoded) URL."""
+
+    def fake_create_mcp_tools(config, timeout=30.0, **kwargs):
+        [server] = config.values()
+        raise RuntimeError(f"401 Unauthorized for url '{httpx.URL(server.url)}'")
+
+    monkeypatch.setattr(
+        "openhands.agent_server.mcp_router.create_mcp_tools", fake_create_mcp_tools
+    )
+
+
+@pytest.mark.parametrize(
+    "secret", ["super-secret-value-12345", "abc def"], ids=["plain", "encoded"]
+)
+def test_mcp_test_masks_substituted_secrets_in_errors_and_logs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, secret: str
+):
+    config = Config(session_api_keys=[])
+    get_secrets_store(config).set_secret("URL_TOKEN", secret)
+    client = TestClient(create_app(config), raise_server_exceptions=False)
+    _fail_with_expanded_url(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="openhands.agent_server.mcp_router"):
+        response = client.post(
+            "/api/mcp/test",
+            json={
+                "server": {
+                    "transport": "http",
+                    "url": "https://mcp.example/mcp?token=${URL_TOKEN}",
+                },
+                "timeout": 5.0,
+            },
+        )
+
+    error = response.json()["error"]
+    assert REDACTED_SECRET_VALUE in error
+    # httpx percent-encodes the value in the URL it reports, e.g. a space.
+    encoded = str(httpx.URL(f"https://x/?t={secret}")).partition("t=")[2]
+    for leaked in {secret, encoded}:
+        assert leaked not in error
+        assert leaked not in caplog.text
+    assert "MCP test failed unexpectedly" in caplog.text
 
 
 def test_mcp_test_names_an_unset_secret_reference(

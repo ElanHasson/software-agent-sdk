@@ -25,9 +25,11 @@ import os
 import re
 import threading
 import time
+import traceback
 import uuid
+from collections.abc import Callable, Collection
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import mcp.types
@@ -529,11 +531,33 @@ def _run_tool_call(
     return MCPToolCallResult(is_error=bool(result.isError), text=text)
 
 
+def _secret_scrubber(values: Collection[str]) -> Callable[[str], str]:
+    """Mask ``values`` in text, including the encoded forms an error can echo
+    them in (a URL's percent-encoding, a JSON string's escaping)."""
+    variants = sorted(
+        {
+            variant
+            for value in values
+            for variant in (value, quote(value, safe=""), json.dumps(value)[1:-1])
+        },
+        key=len,
+        reverse=True,
+    )
+
+    def scrub(text: str) -> str:
+        for variant in variants:
+            text = text.replace(variant, REDACTED_SECRET_VALUE)
+        return text
+
+    return scrub
+
+
 def _probe_mcp_server(
     request: MCPTestRequest,
     cipher: Cipher | None,
     mcp_oauth_factory: Any | None = None,
     mcp_config: dict[str, MCPServer] | None = None,
+    secret_values: Collection[str] = (),
 ) -> MCPTestResponse:
     """Synchronous probe -- safe to run inside ``run_in_executor``.
 
@@ -541,11 +565,13 @@ def _probe_mcp_server(
     thread via ``MCPClient.call_async_from_sync``. We deliberately do not
     call it from the FastAPI request task; instead the caller hops into a
     threadpool first. ``mcp_config`` replaces the request's own (decrypted)
-    config, e.g. with its secret references expanded.
+    config, e.g. with its secret references expanded; ``secret_values`` are
+    masked in everything the probe logs or returns.
     """
 
     if mcp_config is None:
         mcp_config = request.to_mcp_config(cipher=cipher)
+    scrub = _secret_scrubber(secret_values)
 
     try:
         server = request.resolved_server
@@ -577,6 +603,7 @@ def _probe_mcp_server(
                     tool_names,
                     request.timeout,
                 )
+                tool_result.text = scrub(tool_result.text)
             oauth_state: MCPOAuthStateResponse | None = None
             if oauth_token_storage is not None:
                 state = oauth_token_storage.export_state()
@@ -588,15 +615,18 @@ def _probe_mcp_server(
                 oauth_state=oauth_state,
             )
     except MCPTimeoutError as exc:
-        logger.info("MCP test timed out for server %r: %s", request.name, exc)
-        return MCPTestFailure(error=str(exc), error_kind="timeout")
+        message = scrub(str(exc))
+        logger.info("MCP test timed out for server %r: %s", request.name, message)
+        return MCPTestFailure(error=message, error_kind="timeout")
     except MCPError as exc:
         # ``MCPError("MCP Connection Failure")`` is what client.connect()
         # raises when the underlying fastmcp client fails to start. Surface
         # the root-cause message (e.g. "sh: 1: mcp-server-github: Permission
         # denied") because the wrapper alone isn't useful.
         cause = exc.__cause__ or exc.__context__
-        detail = str(cause) if cause else str(exc) or "Failed to connect to MCP server"
+        detail = scrub(
+            str(cause) if cause else str(exc) or "Failed to connect to MCP server"
+        )
         logger.info(
             "MCP test connection failed for server %r: %s", request.name, detail
         )
@@ -604,13 +634,23 @@ def _probe_mcp_server(
     except Exception as exc:  # noqa: BLE001 - we want to surface anything else
         # Any other exception is unexpected but should still return a
         # structured response: the UI can't recover from a 500.
-        logger.warning(
-            "MCP test failed unexpectedly for server %r",
-            request.name,
-            exc_info=True,
-        )
+        if secret_values:
+            # The traceback can carry the expanded config, e.g. in a URL.
+            logger.warning(
+                "MCP test failed unexpectedly for server %r: %s",
+                request.name,
+                scrub("".join(traceback.format_exception(exc))),
+            )
+        else:
+            logger.warning(
+                "MCP test failed unexpectedly for server %r",
+                request.name,
+                exc_info=True,
+            )
         return MCPTestFailure(
-            error=f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+            error=scrub(
+                f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            ),
             error_kind="unknown",
         )
 
@@ -646,24 +686,6 @@ def _expand_secret_references(
     return expanded, values, sorted(set(unresolved))
 
 
-def _scrub_values(response: MCPTestResponse, values: set[str]) -> MCPTestResponse:
-    """Mask substituted values, which the caller never supplied, in its text."""
-
-    def scrub(text: str) -> str:
-        for value in sorted(values, key=len, reverse=True):
-            text = text.replace(value, REDACTED_SECRET_VALUE)
-        return text
-
-    if isinstance(response, MCPTestFailure):
-        return response.model_copy(update={"error": scrub(response.error)})
-    if response.tool_result is not None:
-        tool_result = response.tool_result.model_copy(
-            update={"text": scrub(response.tool_result.text)}
-        )
-        return response.model_copy(update={"tool_result": tool_result})
-    return response
-
-
 def _probe_with_secret_references(
     request: MCPTestRequest, cipher: Cipher | None, get_secret: SecretLookup
 ) -> MCPTestResponse:
@@ -687,8 +709,8 @@ def _probe_with_secret_references(
             ),
             error_kind="unknown",
         )
-    return _scrub_values(
-        _probe_mcp_server(request, cipher, mcp_config=mcp_config), values
+    return _probe_mcp_server(
+        request, cipher, mcp_config=mcp_config, secret_values=values
     )
 
 
