@@ -29,7 +29,7 @@ import traceback
 import uuid
 from collections.abc import Callable, Collection
 from typing import Annotated, Any, Literal
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import mcp.types
@@ -531,25 +531,28 @@ def _run_tool_call(
     return MCPToolCallResult(is_error=bool(result.isError), text=text)
 
 
+def _encoded_forms(value: str) -> str:
+    """Regex for ``value`` with each character literal, percent-encoded or
+    JSON-escaped, so any mix matches: httpx encodes each URL component with
+    its own set of safe characters (e.g. ``user:p%40ss`` in userinfo)."""
+
+    def char(ch: str) -> str:
+        encoded = "".join(f"%{byte:02X}" for byte in ch.encode())
+        forms = {re.escape(ch), re.escape(json.dumps(ch)[1:-1]), f"(?i:{encoded})"}
+        if ch == " ":
+            forms.add(r"\+")
+        return "(?:" + "|".join(sorted(forms)) + ")"
+
+    return "".join(char(ch) for ch in value)
+
+
 def _secret_scrubber(values: Collection[str]) -> Callable[[str], str]:
-    """Mask ``values`` in text, including the encoded forms an error can echo
-    them in (a URL's percent-encoding, a JSON string's escaping)."""
-    variants = sorted(
-        {
-            variant
-            for value in values
-            for variant in (value, quote(value, safe=""), json.dumps(value)[1:-1])
-        },
-        key=len,
-        reverse=True,
-    )
-
-    def scrub(text: str) -> str:
-        for variant in variants:
-            text = text.replace(variant, REDACTED_SECRET_VALUE)
-        return text
-
-    return scrub
+    """Mask ``values`` in text, in whatever encoding an error echoes them."""
+    values = sorted({value for value in values if value}, key=len, reverse=True)
+    if not values:
+        return lambda text: text
+    pattern = re.compile("|".join(_encoded_forms(value) for value in values))
+    return lambda text: pattern.sub(REDACTED_SECRET_VALUE, text)
 
 
 def _probe_mcp_server(

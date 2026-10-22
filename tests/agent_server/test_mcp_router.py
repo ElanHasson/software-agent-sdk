@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import Generator
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -491,10 +492,20 @@ def _fail_with_expanded_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "secret", ["super-secret-value-12345", "abc def"], ids=["plain", "encoded"]
+    "secret, url",
+    [
+        ("super-secret-value-12345", "https://mcp.example/mcp?token=${URL_TOKEN}"),
+        ("abc def", "https://mcp.example/mcp?token=${URL_TOKEN}"),
+        # httpx keeps ``:`` but encodes ``@`` in userinfo: a partial encoding.
+        ("user:Tr0ub4dor@3", "https://${URL_TOKEN}@mcp.example/mcp"),
+    ],
+    ids=["plain", "encoded", "userinfo"],
 )
 def test_mcp_test_masks_substituted_secrets_in_errors_and_logs(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, secret: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    secret: str,
+    url: str,
 ):
     config = Config(session_api_keys=[])
     get_secrets_store(config).set_secret("URL_TOKEN", secret)
@@ -504,22 +515,14 @@ def test_mcp_test_masks_substituted_secrets_in_errors_and_logs(
     with caplog.at_level(logging.INFO, logger="openhands.agent_server.mcp_router"):
         response = client.post(
             "/api/mcp/test",
-            json={
-                "server": {
-                    "transport": "http",
-                    "url": "https://mcp.example/mcp?token=${URL_TOKEN}",
-                },
-                "timeout": 5.0,
-            },
+            json={"server": {"transport": "http", "url": url}, "timeout": 5.0},
         )
 
     error = response.json()["error"]
     assert REDACTED_SECRET_VALUE in error
-    # httpx percent-encodes the value in the URL it reports, e.g. a space.
-    encoded = str(httpx.URL(f"https://x/?t={secret}")).partition("t=")[2]
-    for leaked in {secret, encoded}:
-        assert leaked not in error
-        assert leaked not in caplog.text
+    # Decoding exposes the secret in any (partial) percent-encoding.
+    assert secret not in unquote(error)
+    assert secret not in unquote(caplog.text)
     assert "MCP test failed unexpectedly" in caplog.text
 
 
