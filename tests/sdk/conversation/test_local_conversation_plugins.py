@@ -5,6 +5,7 @@ import logging
 import shutil
 import uuid
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -1853,40 +1854,118 @@ class TestAmbientPluginResume:
         assert {"exp-skill", "exp:hello"} <= skills
         assert "exp-server" in servers
 
+    @pytest.mark.parametrize(
+        "failure",
+        ["installed_manifest", "metadata", "local_manifest", "untracked_manifest"],
+    )
     def test_failed_discovery_keeps_ambient_contributions_on_resume(
-        self, tmp_path: Path, mock_llm, monkeypatch
+        self, tmp_path: Path, mock_llm, monkeypatch, failure
     ):
-        """A transient discovery failure keeps the last load's contributions and
-        their record, so the next successful load still reconciles them."""
+        install_store, user_dir, workspace = self._setup(tmp_path, monkeypatch)
+        source = self._make_plugin(tmp_path / "src", "amb")
+        install_plugin(str(source), installed_dir=install_store)
+        if failure == "local_manifest":
+            broken_dir = self._make_plugin(user_dir / "bbb", "bbb")
+        else:
+            other = self._make_plugin(tmp_path / "other", "bbb")
+            install_plugin(str(other), installed_dir=install_store)
+            broken_dir = install_store / "bbb"
+        cid = uuid.uuid4()
+        self._load(tmp_path, workspace, cid, agent=self._caller_agent(mock_llm))
+
+        damaged = (
+            install_store / ".installed.json"
+            if failure == "metadata"
+            else broken_dir / ".plugin" / "plugin.json"
+        )
+        if failure == "untracked_manifest":
+            metadata_path = install_store / ".installed.json"
+            metadata = json.loads(metadata_path.read_text())
+            del metadata["extensions"]["bbb"]
+            metadata_path.write_text(json.dumps(metadata))
+        original = damaged.read_text()
+        damaged.write_text("{invalid json")
+        skills, servers = self._load(tmp_path, workspace, cid)
+        assert {"amb-skill", "amb:hello", "bbb-skill", "caller-skill"} <= skills
+        assert {"amb-server", "bbb-server", "caller-server"} <= servers
+        assert damaged.read_text() == "{invalid json"
+
+        damaged.write_text(original)
+        disable_plugin("amb", installed_dir=install_store)
+        skills, servers = self._load(tmp_path, workspace, cid)
+        assert not {"amb-skill", "amb:hello"} & skills
+        assert "amb-server" not in servers
+        assert {"bbb-skill", "caller-skill"} <= skills
+
+    @pytest.mark.parametrize("operation", ["resume", "fork"])
+    def test_explicit_agent_keeps_same_named_caller_contributions(
+        self, tmp_path: Path, mock_llm, monkeypatch, operation
+    ):
         install_store, _, workspace = self._setup(tmp_path, monkeypatch)
         source = self._make_plugin(tmp_path / "src", "amb")
         install_plugin(str(source), installed_dir=install_store)
         cid = uuid.uuid4()
-        plugin_skills = {"amb-skill", "amb:hello"}
         self._load(tmp_path, workspace, cid, agent=self._caller_agent(mock_llm))
-
-        with patch(
-            "openhands.sdk.conversation.impl.local_conversation.load_available_plugins",
-            side_effect=OSError("transient"),
-        ):
-            skills, servers = self._load(tmp_path, workspace, cid)
-        assert plugin_skills | {"caller-skill"} <= skills
-        assert {"amb-server", "caller-server"} <= servers
-
         disable_plugin("amb", installed_dir=install_store)
-        skills, servers = self._load(tmp_path, workspace, cid)
-        assert not plugin_skills & skills
-        assert "amb-server" not in servers
-        assert "caller-skill" in skills
+        custom = Agent(
+            llm=mock_llm,
+            tools=[],
+            agent_context=AgentContext(
+                skills=[Skill(name="amb-skill", content="Caller")],
+            ),
+            mcp_config={"amb-server": MCPServer(command="caller-cmd")},
+        )
+        if operation == "fork":
+            with closing(
+                LocalConversation(
+                    agent=None,
+                    workspace=workspace,
+                    persistence_dir=tmp_path / "conversations",
+                    conversation_id=cid,
+                    visualizer=None,
+                )
+            ) as original:
+                with closing(original.fork(agent=custom)) as fork:
+                    fork._ensure_plugins_loaded()
+                    cid = fork.id
+            custom = None
+        skills, servers = self._load(tmp_path, workspace, cid, agent=custom)
+        assert "amb-skill" in skills
+        assert "amb-server" in servers
 
-    def test_legacy_state_drops_disabled_installed_plugin_on_resume(
+    def test_inherited_agent_fork_drops_disabled_plugin(
         self, tmp_path: Path, mock_llm, monkeypatch
     ):
-        """A conversation persisted before contributions were recorded (no
-        ``ambient_plugin_*`` keys in base_state.json) is reconciled too."""
         install_store, _, workspace = self._setup(tmp_path, monkeypatch)
         source = self._make_plugin(tmp_path / "src", "amb")
         install_plugin(str(source), installed_dir=install_store)
+        cid = uuid.uuid4()
+        self._load(tmp_path, workspace, cid, agent=self._caller_agent(mock_llm))
+        disable_plugin("amb", installed_dir=install_store)
+        with closing(
+            LocalConversation(
+                agent=None,
+                workspace=workspace,
+                persistence_dir=tmp_path / "conversations",
+                conversation_id=cid,
+                visualizer=None,
+            )
+        ) as original:
+            with closing(original.fork()) as fork:
+                fork._ensure_plugins_loaded()
+                fork_id = fork.id
+        skills, servers = self._load(tmp_path, workspace, fork_id)
+        assert "amb-skill" not in skills
+        assert "amb-server" not in servers
+        assert "caller-skill" in skills
+
+    def test_legacy_state_keeps_caller_content_matching_disabled_plugin(
+        self, tmp_path: Path, mock_llm, monkeypatch
+    ):
+        install_store, _, workspace = self._setup(tmp_path, monkeypatch)
+        source = self._make_plugin(tmp_path / "src", "caller")
+        install_plugin(str(source), installed_dir=install_store)
+        disable_plugin("caller", installed_dir=install_store)
         cid = uuid.uuid4()
         self._load(tmp_path, workspace, cid, agent=self._caller_agent(mock_llm))
 
@@ -1896,10 +1975,7 @@ class TestAmbientPluginResume:
         data.pop("ambient_plugin_mcp_servers", None)
         base_state.write_text(json.dumps(data))
 
-        disable_plugin("amb", installed_dir=install_store)
         skills, servers = self._load(tmp_path, workspace, cid)
-        assert not {"amb-skill", "amb:hello"} & skills
-        assert "amb-server" not in servers
         assert "caller-skill" in skills
         assert "caller-server" in servers
 

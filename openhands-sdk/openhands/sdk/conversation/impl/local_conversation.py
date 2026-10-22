@@ -85,8 +85,6 @@ from openhands.sdk.plugin import (
     PluginSource,
     ResolvedPluginSource,
     fetch_plugin_with_resolution,
-    get_installed_plugins_dir,
-    list_installed_plugins,
     load_available_plugins,
 )
 from openhands.sdk.secret import StaticSecret
@@ -438,6 +436,10 @@ class LocalConversation(BaseConversation):
             recovered_specs = extract_client_tool_specs(agent.tools)
             if recovered_specs:
                 register_client_tools(recovered_specs)
+        else:
+            with self._state:
+                self._state.ambient_plugin_skills = []
+                self._state.ambient_plugin_mcp_servers = []
         self.agent = agent
 
         # Default callback: persist every event to state
@@ -928,15 +930,13 @@ class LocalConversation(BaseConversation):
             fork_conv._state.head_is_empty = (
                 self._state.head_is_empty if from_event_id is None else False
             )
-            # The fork's agent carries the source's ambient plugin
-            # contributions, so it inherits their record (see
-            # _ensure_plugins_loaded).
-            fork_conv._state.ambient_plugin_skills = copy.copy(
-                self._state.ambient_plugin_skills
-            )
-            fork_conv._state.ambient_plugin_mcp_servers = copy.copy(
-                self._state.ambient_plugin_mcp_servers
-            )
+            if agent is None:
+                fork_conv._state.ambient_plugin_skills = copy.copy(
+                    self._state.ambient_plugin_skills
+                )
+                fork_conv._state.ambient_plugin_mcp_servers = copy.copy(
+                    self._state.ambient_plugin_mcp_servers
+                )
             # Full rebuild: the copied events may need property enforcement
             # (same posture as cold load).
             fork_conv._state.rebuild_view()
@@ -1029,11 +1029,12 @@ class LocalConversation(BaseConversation):
                 work_dir=self.workspace.working_dir,
                 include_user=True,
                 include_project=True,
+                strict=True,
             )
         except Exception:
             logger.warning(
                 "Failed to load ambient (installed/local) plugins; "
-                "continuing without them",
+                "keeping previous contributions",
                 exc_info=True,
             )
             ambient_plugins = None
@@ -1369,37 +1370,12 @@ class LocalConversation(BaseConversation):
         self._plugins_loaded = True
 
     def _previous_ambient_contributions(self) -> tuple[set[str], set[str]]:
-        """Skill and MCP server names ambient plugins contributed at the last load.
-
-        A conversation persisted before these were recorded has no record; for
-        it, fall back to what currently disabled installed plugins would
-        contribute (a removed plugin directory leaves nothing to compare
-        against). Best-effort: a failure here only skips that cleanup.
-        """
-        skills = self._state.ambient_plugin_skills
-        servers = self._state.ambient_plugin_mcp_servers
-        if skills is not None and servers is not None:
-            return set(skills), set(servers)
-
-        stale_skills: set[str] = set()
-        stale_servers: set[str] = set()
-        try:
-            disabled = [i.name for i in list_installed_plugins() if not i.enabled]
-        except Exception:
-            logger.warning("Failed to list installed plugins", exc_info=True)
-            disabled = []
-        installed_dir = get_installed_plugins_dir()
-        for name in disabled:
-            try:
-                plugin = Plugin.load(installed_dir / name)
-            except Exception:
-                logger.warning(
-                    f"Failed to load disabled plugin '{name}'", exc_info=True
-                )
-                continue
-            stale_skills.update(s.name for s in plugin.get_all_skills())
-            stale_servers.update(plugin.mcp_config)
-        return stale_skills, stale_servers
+        # Legacy conversations have no ownership record. Matching names alone
+        # cannot distinguish their caller-supplied content from plugin content.
+        return (
+            set(self._state.ambient_plugin_skills or []),
+            set(self._state.ambient_plugin_mcp_servers or []),
+        )
 
     def _expand_plugin_source_ref(self, value: str) -> str:
         return expand_variable_references(

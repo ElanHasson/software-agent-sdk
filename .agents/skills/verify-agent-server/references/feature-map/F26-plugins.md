@@ -655,10 +655,12 @@ Preconditions:
   `activated_skills: ["qa-f26-inst:qa-hello"]` on the user message), and the
   agent context lists none of its skills. Ambient contributions are merged
   into the agent persisted in `base_state.json`, so the conversation records
-  their skill and MCP server names and drops them before re-discovery (read
-  from source and not driven here: the MCP servers follow the same path, and
-  a conversation persisted before that record existed drops what disabled
-  installed plugins contribute). The command is sent here for the
+  their skill and MCP server names and drops them after successful discovery.
+  A failed scan preserves the previous contributions and ownership record.
+  Read from source and not driven here: MCP servers follow the same path;
+  explicit replacement agents start with no inherited ownership, and legacy
+  conversations without a record retain unidentifiable contributions rather
+  than deleting caller content by name. The command is sent here for the
   first time because a keyword skill activates once per conversation
   (`activated_knowledge_skills`). The plugin stays disabled.
 - **Persistence across a restart (`F26.restart-persist`).** Disable
