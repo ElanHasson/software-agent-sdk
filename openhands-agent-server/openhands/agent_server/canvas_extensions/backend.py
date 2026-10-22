@@ -743,6 +743,8 @@ class CanvasExtensionBackendManager:
     async def start(self, name: str, revision: str) -> BackendStatus:
         async with self._lock(name):
             current = await self._refresh_unlocked(name)
+            if current.state in {"missing", "unsupported"}:
+                return current
             if revision != self.revision(name):
                 raise ValueError("approval revision does not match installed revision")
             manifest = self._manifest(name)
@@ -755,8 +757,6 @@ class CanvasExtensionBackendManager:
                 raise ValueError(
                     "Backend secrets require an exact revision-bound grant"
                 )
-            if current.state in {"missing", "unsupported"}:
-                return current
             runtime = self._runtime(name)
             task = runtime.start_task
             if runtime.process and runtime.process.returncode is None:

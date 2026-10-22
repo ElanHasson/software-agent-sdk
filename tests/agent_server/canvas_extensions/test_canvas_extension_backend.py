@@ -369,6 +369,14 @@ async def test_failed_start_cleanup_and_unsupported_states(tmp_path: Path):
     assert (await manager.status("my-extension-missing")).state == "missing"
     assert (await manager.status("my-extension")).state == "unhealthy"
     assert (await manager.status("browser-only")).state == "unsupported"
+    # `start` is diagnostic for unknown / backend-less apps: it returns the
+    # status instead of raising, even though no valid revision exists for
+    # them (`revision()` is None). Any non-empty revision stands in for the
+    # request body's `min_length=1` value.
+    assert (await manager.start("my-extension-missing", "sha256:0")).state == (
+        "missing"
+    )
+    assert (await manager.start("browser-only", "sha256:0")).state == "unsupported"
     await manager.shutdown()
 
 
