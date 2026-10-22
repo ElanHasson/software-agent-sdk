@@ -111,7 +111,9 @@ def get_changes_in_repo(
     vs the latest commit) instead.
 
     Args:
-        repo_dir: Path to the git repository
+        repo_dir: Path to the git repository, or to a directory inside one.
+            Only changes under this directory are listed, with paths relative
+            to it.
         ref: Optional explicit ref to compare against (e.g. ``"HEAD"`` or a
             commit hash). When ``None``, behaves as before and compares
             against the upstream/default branch.
@@ -135,12 +137,10 @@ def get_changes_in_repo(
         logger.warning(f"No valid git reference found for {validated_repo}")
         return []
 
-    # Get changed files using secure git command
-    # ``-z`` makes git print names verbatim and NUL-terminated, so names
-    # with spaces, non-ASCII characters, tabs or newlines survive parsing.
+    # NUL delimiters preserve filenames; --relative keeps the requested path base.
     try:
         changed_files_output = run_git_command(
-            ["git", "--no-pager", "diff", "--name-status", "-z", ref],
+            ["git", "--no-pager", "diff", "--name-status", "-z", "--relative", ref],
             validated_repo,
             strip=False,
         )
