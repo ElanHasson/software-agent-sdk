@@ -2622,8 +2622,18 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
     def _validate_image_request(self, messages: list[Message]) -> None:
         # Token counting shares the formatters and must still work before an
         # agent delegates images to a vision tool. Reject only actual requests.
+        # Only the latest user message is rejected: the agent can delegate
+        # those images (or explain the capability gap). Images in tool
+        # observations or older messages cannot be delegated after the fact,
+        # so rejecting them would hard-fail previously working flows; the
+        # formatter drops those pixels for text-only models instead.
+        latest_user = next(
+            (message for message in reversed(messages) if message.role == "user"),
+            None,
+        )
         if (
-            any(message.contains_image for message in messages)
+            latest_user is not None
+            and latest_user.contains_image
             and not self.vision_is_active()
         ):
             raise LLMBadRequestError(

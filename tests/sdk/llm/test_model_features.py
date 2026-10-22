@@ -812,3 +812,25 @@ def test_stale_registry_cannot_disable_owned_manual_thinking():
     )
     assert features.thinking_mode == "manual"
     assert features.sources["thinking_mode"] == "sdk"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Provider-prefixed routes must keep the family capabilities:
+        # vertex_ai/azure_ai are not OpenAI-compatible family prefixes, and
+        # Bedrock sub-routes sit between `bedrock/` and the vendor id.
+        "vertex_ai/claude-sonnet-4-5",
+        "vertex_ai/claude-haiku-4-5",
+        "vertex_ai/claude-sonnet-4-6",
+        "azure_ai/claude-sonnet-4-5",
+        "bedrock/converse/anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "bedrock/invoke/anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+)
+def test_provider_prefixed_claude_keeps_manual_thinking(model):
+    features = get_features(model)
+    assert features.thinking_mode == "manual"
+    assert features.supports_extended_thinking
+    assert features.supports_prompt_cache

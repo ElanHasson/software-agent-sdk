@@ -240,16 +240,25 @@ def _owned_capabilities(model: str | None) -> dict[str, bool | str]:
         "xai",
         "litellm",
         "azure",
+        "vertex_ai",
+        "azure_ai",
     }:
         identity = name
     elif prefix == "openrouter" and separator:
         # Vendor namespaces are part of OpenRouter's public model ids.
         identity = name.partition("/")[2] or name
     elif prefix == "bedrock" or "/" not in route:
+        # Bedrock ids may carry a sub-route segment before the vendor id
+        # (``bedrock/converse/anthropic.claude-...``, ``bedrock/invoke/...``);
+        # drop it so the family regex below still sees the family id.
+        bedrock_name = name
+        sub_route, sub_sep, remainder = bedrock_name.partition("/")
+        if sub_sep and sub_route in {"converse", "invoke"}:
+            bedrock_name = remainder
         identity = re.sub(
             r"^(?:(?:us|eu|apac|global)\.)?(?:anthropic|openai)\.",
             "",
-            name if separator else route,
+            bedrock_name if separator else route,
         )
     values: dict[str, bool | str] = {}
     for pattern, capabilities in _MODEL_CAPABILITIES:
