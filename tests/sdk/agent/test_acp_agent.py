@@ -8790,6 +8790,56 @@ class TestMcpConfigToAcpServers:
             ("authorization", "Bearer explicit")
         ]
 
+    @staticmethod
+    def _oauth_server(**state):
+        return {
+            "mcpServers": {
+                "remote": {
+                    "url": "https://h/mcp",
+                    "auth": {"strategy": "oauth2", "state": state},
+                }
+            }
+        }
+
+    def test_oauth_access_token_maps_to_bearer_header(self):
+        cfg = self._oauth_server(
+            tokens={"access_token": "tok-1", "refresh_token": "ref-1"},
+            token_expires_at=time.time() + 3600,
+        )
+        out = _mcp_config_to_acp_servers(
+            self._config(cfg), self._caps(http=True, sse=False)
+        )
+        assert [(h.name, h.value) for h in out[0].headers] == [
+            ("Authorization", "Bearer tok-1")
+        ]
+
+    def test_oauth_token_without_expiry_is_forwarded(self):
+        cfg = self._oauth_server(tokens={"access_token": "tok-1"})
+        out = _mcp_config_to_acp_servers(
+            self._config(cfg), self._caps(http=True, sse=False)
+        )
+        assert [h.value for h in out[0].headers] == ["Bearer tok-1"]
+
+    def test_oauth_expired_token_is_not_forwarded(self):
+        cfg = self._oauth_server(
+            tokens={"access_token": "tok-1"}, token_expires_at=time.time() - 60
+        )
+        out = _mcp_config_to_acp_servers(
+            self._config(cfg), self._caps(http=True, sse=False)
+        )
+        assert out[0].headers == []
+
+    def test_oauth_without_stored_token_forwards_no_header(self):
+        cfg = {
+            "mcpServers": {
+                "remote": {"url": "https://h/mcp", "auth": {"strategy": "oauth2"}}
+            }
+        }
+        out = _mcp_config_to_acp_servers(
+            self._config(cfg), self._caps(http=True, sse=False)
+        )
+        assert out[0].headers == []
+
     def test_sse_gated_on_capability(self):
         from acp.schema import SseMcpServer
 

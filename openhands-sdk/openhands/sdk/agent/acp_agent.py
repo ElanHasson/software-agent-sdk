@@ -672,12 +672,40 @@ def _extract_session_models(
 _ACPMcpServer = HttpMcpServer | SseMcpServer | McpServerStdio | AcpMcpServer
 
 
+def _oauth_bearer_headers(server: MCPServer, name: str) -> list[HttpHeader]:
+    """Return the stored OAuth access token as a bearer header, if still valid."""
+    state = server.oauth_auth.state if server.oauth_auth else None
+    token = state.tokens.access_token if state and state.tokens else None
+    if token is None:
+        logger.warning(
+            "ACP MCP server %r uses OAuth but has no stored access token; "
+            "authorize it in settings first",
+            name,
+        )
+        return []
+    if state and state.token_expires_at is not None:
+        if state.token_expires_at <= time.time():
+            logger.warning(
+                "ACP MCP server %r has an expired OAuth access token; "
+                "re-authorize it in settings",
+                name,
+            )
+            return []
+    return [
+        HttpHeader(name="Authorization", value=f"Bearer {token.get_secret_value()}")
+    ]
+
+
 def _remote_mcp_headers(server: MCPServer, name: str) -> list[HttpHeader]:
     """Convert remote MCP headers/auth into ACP's header-only representation."""
     headers = [
         HttpHeader(name=name, value=value.get_secret_value())
         for name, value in (server.headers or {}).items()
     ]
+
+    if server.oauth_auth is not None:
+        headers.extend(_oauth_bearer_headers(server, name))
+        return headers
 
     auth_headers = server.auth.to_http_headers() if server.auth is not None else {}
     if auth_headers is None:
