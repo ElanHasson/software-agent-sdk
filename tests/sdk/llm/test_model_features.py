@@ -754,7 +754,8 @@ def test_endpoint_and_caller_vision_decisions_are_authoritative(value):
 
 
 @pytest.mark.parametrize(
-    "model", ["my-deepseek-v4.1-flash-deployment", "custom/deepseek-v4.1-flash"]
+    "model",
+    ["my-deepseek-v4.1-flash-deployment", "custom/deepseek-v4.1-flash"],
 )
 def test_unrecognized_deployment_names_do_not_acquire_owned_capabilities(model):
     features = get_features(
@@ -834,3 +835,31 @@ def test_provider_prefixed_claude_keeps_manual_thinking(model):
     assert features.thinking_mode == "manual"
     assert features.supports_extended_thinking
     assert features.supports_prompt_cache
+
+
+@pytest.mark.parametrize(
+    "model,capability,expected",
+    [
+        ("digitalocean/glm-5.3", "force_string_serializer", True),
+        ("digitalocean/glm-5.2", "force_string_serializer", True),
+        ("z-ai/glm-5.3", "force_string_serializer", True),
+        ("digitalocean/kimi-k3", "send_reasoning_content", True),
+        ("digitalocean/kimi-k3", "supports_reasoning_effort", True),
+        ("openrouter/deepseek/deepseek-v4-pro", "send_reasoning_content", True),
+        ("openrouter/deepseek/deepseek-v4-flash", "send_reasoning_content", True),
+        ("bedrock/moonshotai.kimi-k2.6", "send_reasoning_content", True),
+        ("digitalocean/openai-gpt-5.6-sol", "supports_responses_api", True),
+        ("digitalocean/openai-gpt-5.6-terra", "supports_prompt_cache_retention", True),
+        ("digitalocean/openai-gpt-5.6-luna", "supports_responses_api", True),
+        ("digitalocean/anthropic-claude-opus-5", "supports_prompt_cache", True),
+        ("digitalocean/anthropic-claude-opus-5.5", "supports_prompt_cache", True),
+        ("digitalocean/anthropic-claude-sonnet-5.5", "supports_prompt_cache", True),
+        ("nvidia/deepseek-r1-0528", "supports_stop_words", False),
+        ("together_ai/deepseek-r1-0528", "supports_stop_words", False),
+        ("sagemaker/anthropic.claude-sonnet-4-5", "thinking_mode", "manual"),
+        ("watsonx/anthropic.claude-sonnet-4-5", "supports_extended_thinking", True),
+        ("watsonx/anthropic.claude-sonnet-4-5", "supports_prompt_cache", True),
+    ],
+)
+def test_family_capabilities_survive_provider_routes(model, capability, expected):
+    assert getattr(get_features(model), capability) == expected

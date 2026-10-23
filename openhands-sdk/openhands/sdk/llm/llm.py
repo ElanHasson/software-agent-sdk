@@ -2772,11 +2772,7 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
         # generation budget. In particular, requesting the largest proxy limit
         # can exclude otherwise valid lower-limit upstream routes (#5181).
         self._effective_max_output_tokens = self.max_output_tokens
-        if (
-            self._effective_max_output_tokens is None
-            and self._model_features().thinking_mode == "manual"
-            and self.extended_thinking_budget
-        ):
+        if self._effective_max_output_tokens is None:
             advertised_limit = (self._model_info or {}).get("max_output_tokens")
             self._effective_max_output_tokens = min(
                 DEFAULT_MAX_OUTPUT_TOKENS_CAP,

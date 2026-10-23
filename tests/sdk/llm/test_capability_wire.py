@@ -42,6 +42,16 @@ def endpoint():
                     "total_tokens": 2,
                 },
             }
+            if self.path.endswith("/messages"):
+                response = {
+                    "id": "wire-test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": body["model"],
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
             payload = json.dumps(response).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -203,3 +213,28 @@ async def test_disabled_vision_rejects_request_but_not_token_count(
         else:
             llm.generate(inputs)
     assert not requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "model", ["anthropic/claude-opus-5", "anthropic/claude-sonnet-5"]
+)
+async def test_anthropic_default_output_budget_is_bounded(endpoint, use_async, model):
+    base, requests = endpoint
+    llm = LLM(
+        model=model,
+        base_url=base,
+        api_key="local-test",
+        num_retries=0,
+        reasoning_effort=None,
+    )
+    inputs = messages("user")[:1] + [
+        Message(role="user", content=[TextContent(text="Say ok.")])
+    ]
+    if use_async:
+        await llm.acompletion(inputs)
+    else:
+        llm.completion(inputs)
+    assert len(requests) == 1
+    assert 0 < requests[0]["max_tokens"] <= 16384

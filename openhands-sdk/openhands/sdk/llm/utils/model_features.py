@@ -215,9 +215,9 @@ _MODEL_CAPABILITIES: tuple[tuple[str, dict[str, bool | str]], ...] = (
             "send_reasoning_content": True,
         },
     ),
-    ("deepseek/deepseek-reasoner", {"send_reasoning_content": True}),
-    ("deepseek/deepseek-v4-pro", {"send_reasoning_content": True}),
-    ("deepseek/deepseek-v4-flash", {"send_reasoning_content": True}),
+    ("deepseek-reasoner", {"send_reasoning_content": True}),
+    ("deepseek-v4-pro", {"send_reasoning_content": True}),
+    ("deepseek-v4-flash", {"send_reasoning_content": True}),
     # Verified user and tool images through the OpenHands proxy (#5460, #5523).
     ("deepseek-v4.1-flash", {"supports_vision": True, "send_reasoning_content": True}),
     # URL restrictions are properties of the serving route, not the model family.
@@ -229,37 +229,14 @@ _MODEL_CAPABILITIES: tuple[tuple[str, dict[str, bool | str]], ...] = (
 
 def _owned_capabilities(model: str | None) -> dict[str, bool | str]:
     route = (_normalize_model_for_litellm(model) or "").lower()
-    identity = route
-    prefix, separator, name = route.partition("/")
-    if separator and prefix in {
-        "openai",
-        "anthropic",
-        "deepseek",
-        "moonshot",
-        "gemini",
-        "xai",
-        "litellm",
-        "azure",
-        "vertex_ai",
-        "azure_ai",
-    }:
-        identity = name
-    elif prefix == "openrouter" and separator:
-        # Vendor namespaces are part of OpenRouter's public model ids.
-        identity = name.partition("/")[2] or name
-    elif prefix == "bedrock" or "/" not in route:
-        # Bedrock ids may carry a sub-route segment before the vendor id
-        # (``bedrock/converse/anthropic.claude-...``, ``bedrock/invoke/...``);
-        # drop it so the family regex below still sees the family id.
-        bedrock_name = name
-        sub_route, sub_sep, remainder = bedrock_name.partition("/")
-        if sub_sep and sub_route in {"converse", "invoke"}:
-            bedrock_name = remainder
-        identity = re.sub(
-            r"^(?:(?:us|eu|apac|global)\.)?(?:anthropic|openai)\.",
-            "",
-            bedrock_name if separator else route,
-        )
+    # LiteLLM's custom provider uses opaque deployment IDs, not model IDs.
+    identity = route if route.startswith("custom/") else route.rsplit("/", 1)[-1]
+    identity = re.sub(
+        r"^(?:(?:us|eu|apac|global)\.)?"
+        r"(?:anthropic|openai|moonshotai)[.-]",
+        "",
+        identity,
+    )
     values: dict[str, bool | str] = {}
     for pattern, capabilities in _MODEL_CAPABILITIES:
         candidate = route if "/" in pattern else identity

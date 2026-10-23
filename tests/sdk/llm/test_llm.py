@@ -1900,15 +1900,17 @@ def test_advertised_output_limit_is_not_a_request_default(mock_info, model, meta
     mock_info.return_value = metadata
     llm = LLM(model=model, api_key=SecretStr("test-key"), usage_id="test")
     assert llm.max_output_tokens is None
-    assert llm.effective_max_output_tokens is None
+    advertised = metadata.get("max_output_tokens", 16384)
+    assert llm.effective_max_output_tokens == min(16384, advertised)
     options = llm._finalize_completion_params(
         formatted_messages=[{"role": "user", "content": "hello"}],
         tools=None,
         add_security_risk_prediction=False,
         kwargs={},
     )[3]
-    assert "max_completion_tokens" not in options
-    assert "max_tokens" not in options
+    assert options.get("max_completion_tokens", options.get("max_tokens")) == min(
+        16384, advertised
+    )
 
 
 @patch("openhands.sdk.llm.llm.get_litellm_model_info")
