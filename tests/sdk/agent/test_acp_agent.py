@@ -6458,7 +6458,9 @@ class TestACPSessionIdPersistence:
     @pytest.mark.parametrize("with_skills", [True, False])
     def test_skills_directory_is_shared_with_the_session(self, tmp_path, with_skills):
         context = (
-            AgentContext(skills=[Skill(name="s", content="body")])
+            AgentContext(
+                skills=[Skill(name="s", content="body", is_agentskills_format=True)]
+            )
             if with_skills
             else None
         )

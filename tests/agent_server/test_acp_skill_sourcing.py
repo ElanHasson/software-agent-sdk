@@ -210,6 +210,7 @@ def test_acp_skills_are_listed_by_path_for_every_provider(
                 name="launch-skill",
                 description="does the launch thing",
                 content="launch body",
+                is_agentskills_format=True,
             )
         ],
     )
@@ -225,9 +226,31 @@ def test_acp_skills_are_listed_by_path_for_every_provider(
 
 def test_skill_names_cannot_escape_the_skills_directory(tmp_path: Path) -> None:
     project = _workspace(tmp_path)
-    agent = _acp_agent(skills=[Skill(name="../evil", content="x")])
+    agent = _acp_agent(
+        skills=[Skill(name="../evil", content="x", is_agentskills_format=True)]
+    )
     _installed_suffix(agent, project)
 
     written = [p for p in project.rglob("SKILL.md") if "evil" in str(p)]
     assert written
     assert all(_skills_dir(project) in p.parents for p in written)
+
+
+def test_skills_hidden_from_the_model_are_not_written_or_listed(tmp_path: Path) -> None:
+    project = _workspace(tmp_path)
+    agent = _acp_agent(
+        skills=[
+            Skill(name="shown", content="s", is_agentskills_format=True),
+            Skill(
+                name="hidden",
+                content="h",
+                is_agentskills_format=True,
+                disable_model_invocation=True,
+            ),
+        ]
+    )
+    suffix = _installed_suffix(agent, project)
+
+    assert (_skills_dir(project) / "shown" / "SKILL.md").exists()
+    assert not (_skills_dir(project) / "hidden").exists()
+    assert "<name>hidden</name>" not in suffix

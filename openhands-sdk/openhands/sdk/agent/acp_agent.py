@@ -2462,9 +2462,12 @@ class ACPAgent(AgentBase):
         context = self.agent_context
         if context is None or not context.skills:
             return
+        _, available = context._partition_skills()
+        if not available:
+            return
         root = self._acp_file_secret_dir(state, "skills")
         shutil.rmtree(root, ignore_errors=True)
-        self._skill_locations = write_skill_files(root, context.skills)
+        self._skill_locations = write_skill_files(root, available)
         self._skills_root = root
 
     def _render_suffix(self, state: ConversationState) -> str | None:
