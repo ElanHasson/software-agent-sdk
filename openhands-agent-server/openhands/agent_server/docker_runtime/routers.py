@@ -23,7 +23,7 @@ from openhands.agent_server.docker_runtime.proxy import (
 from openhands.agent_server.docker_runtime.registry import (
     ConversationContainer,
     DockerConversationRegistry,
-    RuntimeArchivedError,
+    RuntimeExpiredError,
 )
 from openhands.agent_server.launch import (
     forward_to_runtime,
@@ -59,7 +59,9 @@ def get_registry(request: Request) -> DockerConversationRegistry:
     return registry
 
 
-def _is_archived(registry: DockerConversationRegistry, conversation_id: UUID) -> bool:
+def _is_conversation_archived(
+    registry: DockerConversationRegistry, conversation_id: UUID
+) -> bool:
     try:
         metadata_path = registry.conversation_dir(conversation_id) / "meta.json"
     except ValueError:
@@ -76,15 +78,17 @@ async def _container(
 ) -> ConversationContainer:
     if not registry.provisioning.manifest_path(conversation_id).is_file():
         raise HTTPException(404, "Conversation not found")
-    if _is_archived(registry, conversation_id):
+    if _is_conversation_archived(registry, conversation_id):
         raise HTTPException(
             409, "Conversation is archived; unarchive it before using its runtime"
         )
     try:
         return await registry.get_or_create(conversation_id)
-    except RuntimeArchivedError as exc:
+    except RuntimeExpiredError as exc:
         raise HTTPException(
-            410, "Conversation runtime was archived; its history is read-only"
+            410,
+            "Conversation runtime expired; unarchiving cannot restore its workspace; "
+            "history is read-only",
         ) from exc
     except Exception as exc:
         logger.exception("Could not start conversation container %s", conversation_id)
@@ -176,7 +180,7 @@ async def start_conversation(
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    if _is_archived(registry, conversation_id):
+    if _is_conversation_archived(registry, conversation_id):
         raise HTTPException(
             409, "Conversation is archived; unarchive it before using its runtime"
         )
@@ -384,7 +388,7 @@ async def delete_conversation(conversation_id: UUID, request: Request) -> Respon
     try:
         await registry.stop(conversation_id)
         registry.provisioning.manifest_path(conversation_id).unlink(missing_ok=True)
-        registry.archived_marker(conversation_id).unlink(missing_ok=True)
+        registry.expired_marker(conversation_id).unlink(missing_ok=True)
         await asyncio.to_thread(
             safe_rmtree, registry.provisioning.runtime_dir(conversation_id)
         )
