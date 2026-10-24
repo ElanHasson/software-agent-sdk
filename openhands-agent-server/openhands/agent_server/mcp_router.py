@@ -668,8 +668,8 @@ def _expand_secret_references(
 ) -> tuple[dict[str, MCPServer], set[str], list[str]]:
     """Expand ``${NAME}`` references the way a conversation on this server does.
 
-    Returns the expanded config, the values substituted and the references
-    without a default that nothing resolved. Only the config as written is
+    Returns the expanded config, the saved-secret values substituted and the
+    references without a default that nothing resolved. Only the config as written is
     searched: ``${...}`` text that a substituted value or default brings in
     stays literal, as in a conversation.
     """
@@ -677,15 +677,15 @@ def _expand_secret_references(
     resolved: set[str] = set()
 
     def lookup(name: str) -> str | None:
-        # Secrets, then this process's environment, as in a conversation; the
-        # environment is checked here too so its values get scrubbed.
+        # Secrets, then this process's environment, as in a conversation.
+        # Like a conversation, mask only the secrets' values.
         value = get_secret(name)
+        if value:
+            values.add(value)
         if value is None:
             value = os.environ.get(name)
         if value is not None:
             resolved.add(name)
-            if value:
-                values.add(value)
         return value
 
     expandable = {name: s for name, s in mcp_config.items() if not s.literal_values}

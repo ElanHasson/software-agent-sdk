@@ -426,8 +426,8 @@ def test_mcp_test_expands_remote_secret_reference_from_saved_secrets(
 def test_mcp_test_expands_references_like_a_conversation(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Saved secrets, then the environment, then ``:-`` defaults; substituted
-    values are masked in the returned tool output."""
+    """Saved secrets, then the environment, then ``:-`` defaults; as in a
+    conversation, only saved secrets are masked in the returned tool output."""
     config = Config(session_api_keys=[])
     get_secrets_store(config).set_secret("HF_BOT_TOKEN", "xoxb-saved-secret")
     monkeypatch.setenv("HF_TEAM_ID", "T0123")
@@ -443,7 +443,7 @@ def test_mcp_test_expands_references_like_a_conversation(
         "    return json.dumps({\n"
         "        'bot_token': token,\n"
         "        'bot_token_ok': token == 'xoxb-saved-secret',\n"
-        "        'team_id_ok': os.environ.get('SLACK_TEAM_ID') == 'T0123',\n"
+        "        'team_id': os.environ.get('SLACK_TEAM_ID'),\n"
         "        'channel': os.environ.get('SLACK_CHANNEL'),\n"
         "    })\n"
         "mcp.run()\n"
@@ -474,7 +474,7 @@ def test_mcp_test_expands_references_like_a_conversation(
     assert json.loads(body["tool_result"]["text"]) == {
         "bot_token": REDACTED_SECRET_VALUE,
         "bot_token_ok": True,
-        "team_id_ok": True,
+        "team_id": "T0123",
         "channel": "general",
     }
 
