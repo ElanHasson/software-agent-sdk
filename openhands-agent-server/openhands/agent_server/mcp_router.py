@@ -20,9 +20,7 @@ persist it through the settings API under the tested server's ``auth.state``.
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import re
+import logging
 import threading
 import time
 import traceback
@@ -35,13 +33,14 @@ import httpx
 import mcp.types
 from fastapi import APIRouter, HTTPException, Request
 from fastmcp.client.auth.oauth import ClientNotFoundError, OAuth
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from openhands.agent_server._secrets_exposure import get_cipher, get_config
 from openhands.agent_server.mcp_oauth_store import (
     InMemoryMCPOAuthTokenStore,
 )
 from openhands.agent_server.persistence import get_secrets_store
+from openhands.sdk.conversation.secret_registry import SecretMask
 from openhands.sdk.logger import get_logger
 from openhands.sdk.mcp import create_mcp_tools
 from openhands.sdk.mcp.client import MCPClient
@@ -51,13 +50,12 @@ from openhands.sdk.mcp.config import (
     MCPOAuthAuthentication,
     MCPOAuthStateResponse,
     MCPServer,
-    dump_mcp_config,
 )
 from openhands.sdk.mcp.exceptions import MCPError, MCPTimeoutError
 from openhands.sdk.mcp.oauth import MCPOAuth
 from openhands.sdk.skills.utils import SecretLookup, expand_mcp_servers
 from openhands.sdk.utils.cipher import Cipher
-from openhands.sdk.utils.pydantic_secrets import REDACTED_SECRET_VALUE
+from openhands.sdk.utils.redact import redact_text_secrets
 
 
 logger = get_logger(__name__)
@@ -531,28 +529,10 @@ def _run_tool_call(
     return MCPToolCallResult(is_error=bool(result.isError), text=text)
 
 
-def _encoded_forms(value: str) -> str:
-    """Regex for ``value`` with each character literal, percent-encoded or
-    JSON-escaped, so any mix matches: httpx encodes each URL component with
-    its own set of safe characters (e.g. ``user:p%40ss`` in userinfo)."""
-
-    def char(ch: str) -> str:
-        encoded = "".join(f"%{byte:02X}" for byte in ch.encode())
-        forms = {re.escape(ch), re.escape(json.dumps(ch)[1:-1]), f"(?i:{encoded})"}
-        if ch == " ":
-            forms.add(r"\+")
-        return "(?:" + "|".join(sorted(forms)) + ")"
-
-    return "".join(char(ch) for ch in value)
-
-
-def _secret_scrubber(values: Collection[str]) -> Callable[[str], str]:
-    """Mask ``values`` in text, in whatever encoding an error echoes them."""
-    values = sorted({value for value in values if value}, key=len, reverse=True)
-    if not values:
-        return lambda text: text
-    pattern = re.compile("|".join(_encoded_forms(value) for value in values))
-    return lambda text: pattern.sub(REDACTED_SECRET_VALUE, text)
+def _error_scrubber(mask: SecretMask) -> Callable[[str], str]:
+    """Mask substituted secrets in error text, then the credential shapes
+    ``redact_text_secrets`` knows, such as a token typed into a URL query."""
+    return lambda text: redact_text_secrets(mask.mask(text))
 
 
 def _probe_mcp_server(
@@ -574,7 +554,8 @@ def _probe_mcp_server(
 
     if mcp_config is None:
         mcp_config = request.to_mcp_config(cipher=cipher)
-    scrub = _secret_scrubber(secret_values)
+    mask = SecretMask(secret_values)
+    scrub = _error_scrubber(mask)
 
     try:
         server = request.resolved_server
@@ -606,7 +587,7 @@ def _probe_mcp_server(
                     tool_names,
                     request.timeout,
                 )
-                tool_result.text = scrub(tool_result.text)
+                tool_result.text = mask.mask(tool_result.text)
             oauth_state: MCPOAuthStateResponse | None = None
             if oauth_token_storage is not None:
                 state = oauth_token_storage.export_state()
@@ -637,19 +618,24 @@ def _probe_mcp_server(
     except Exception as exc:  # noqa: BLE001 - we want to surface anything else
         # Any other exception is unexpected but should still return a
         # structured response: the UI can't recover from a 500.
-        if secret_values:
-            # The traceback can carry the expanded config, e.g. in a URL.
-            logger.warning(
-                "MCP test failed unexpectedly for server %r: %s",
-                request.name,
-                scrub("".join(traceback.format_exception(exc))),
-            )
-        else:
-            logger.warning(
-                "MCP test failed unexpectedly for server %r",
-                request.name,
-                exc_info=True,
-            )
+        if logger.isEnabledFor(logging.WARNING):
+            # The traceback can carry the expanded config, e.g. in a URL. The
+            # handlers format ``exc_info`` themselves, so a masked traceback
+            # can only be logged as text; keep ``exc_info`` when it is clean.
+            formatted = "".join(traceback.format_exception(exc))
+            masked = scrub(formatted)
+            if masked == formatted:
+                logger.warning(
+                    "MCP test failed unexpectedly for server %r",
+                    request.name,
+                    exc_info=exc,
+                )
+            else:
+                logger.warning(
+                    "MCP test failed unexpectedly for server %r: %s",
+                    request.name,
+                    masked,
+                )
         return MCPTestFailure(
             error=scrub(
                 f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
@@ -658,56 +644,75 @@ def _probe_mcp_server(
         )
 
 
-# The references a conversation expands (``openhands.sdk.skills.utils``): a
-# name and, when given, a ``:-`` default.
-_REFERENCE = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)(:-[^}]*)?\}")
-
-
 def _expand_secret_references(
-    mcp_config: dict[str, MCPServer], get_secret: SecretLookup
-) -> tuple[dict[str, MCPServer], set[str], list[str]]:
+    mcp_config: dict[str, MCPServer], get_secret: SecretLookup, values: set[str]
+) -> tuple[dict[str, MCPServer], list[str]]:
     """Expand ``${NAME}`` references the way a conversation on this server does.
 
-    Returns the expanded config, the saved-secret values substituted and the
-    references without a default that nothing resolved. Only the config as written is
-    searched: ``${...}`` text that a substituted value or default brings in
-    stays literal, as in a conversation.
+    Adds the saved-secret values substituted to ``values`` (also when the
+    expanded config fails validation, so the caller can mask the error) and
+    returns the expanded config with the references without a default that
+    nothing resolved. An OAuth server's ``auth`` stays as written: the OAuth
+    client copies a configured client secret into the state returned for the
+    caller to save.
     """
-    values: set[str] = set()
-    resolved: set[str] = set()
+    cache: dict[str, str | None] = {}
 
     def lookup(name: str) -> str | None:
-        # Secrets, then this process's environment, as in a conversation.
-        # Like a conversation, mask only the secrets' values.
-        value = get_secret(name)
-        if value:
-            values.add(value)
-        if value is None:
-            value = os.environ.get(name)
-        if value is not None:
-            resolved.add(name)
-        return value
+        # Secrets, then this process's environment, as in a conversation; the
+        # SDK reads the environment. Like a conversation, mask only the
+        # secrets' values. One store read per name, however often it is used.
+        if name not in cache:
+            cache[name] = value = get_secret(name)
+            if value:
+                values.add(value)
+        return cache[name]
 
-    expandable = {name: s for name, s in mcp_config.items() if not s.literal_values}
-    references = _REFERENCE.findall(json.dumps(dump_mcp_config(expandable)))
-    required = {name for name, default in references if not default}
-    expanded = expand_mcp_servers(mcp_config, lookup)
-    return expanded, values, sorted(required - resolved)
+    unresolved: set[str] = set()
+    oauth_auth = {
+        name: server.auth
+        for name, server in mcp_config.items()
+        if server.oauth_auth is not None
+    }
+    expanded = expand_mcp_servers(
+        {
+            name: server.model_copy(update={"auth": None})
+            if name in oauth_auth
+            else server
+            for name, server in mcp_config.items()
+        },
+        lookup,
+        on_unresolved=unresolved.add,
+    )
+    for name, auth in oauth_auth.items():
+        expanded[name] = expanded[name].model_copy(update={"auth": auth})
+    return expanded, sorted(unresolved)
 
 
 def _probe_with_secret_references(
     request: MCPTestRequest, cipher: Cipher | None, get_secret: SecretLookup
 ) -> MCPTestResponse:
-    """``_probe_mcp_server`` with the config's ``${NAME}`` references expanded.
-
-    OAuth servers are probed as configured: the OAuth client copies a
-    configured client secret into the state returned for the caller to save.
-    """
-    if request.resolved_server.oauth_auth is not None:
-        return _probe_mcp_server(request, cipher)
-    mcp_config, values, unresolved = _expand_secret_references(
-        request.to_mcp_config(cipher=cipher), get_secret
-    )
+    """``_probe_mcp_server`` with the config's ``${NAME}`` references expanded."""
+    values: set[str] = set()
+    try:
+        mcp_config, unresolved = _expand_secret_references(
+            request.to_mcp_config(cipher=cipher), get_secret, values
+        )
+    except ValidationError as exc:
+        # Valid as written, invalid once expanded: an empty value as the URL,
+        # or a header named ``Authorization`` next to ``auth``. Pydantic's
+        # message would echo the expanded input, so report locations only.
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+            for error in exc.errors()
+        )
+        message = _error_scrubber(SecretMask(values))(detail)
+        logger.info("MCP test config invalid for server %r: %s", request.name, message)
+        return MCPTestFailure(error=message, error_kind="unknown")
+    except OSError as exc:
+        message = f"Could not read the saved secrets: {exc}"
+        logger.info("MCP test for server %r: %s", request.name, message)
+        return MCPTestFailure(error=message, error_kind="unknown")
     if unresolved:
         # Bare names: settings UIs mask the typed credential, here the
         # ``${NAME}`` reference itself, wherever it appears in the error.
@@ -740,7 +745,7 @@ def _probe_with_secret_references(
         "Encrypted `env`/`headers` values round-tripped from settings are "
         "decrypted before the connection is attempted, and `${NAME}` "
         "references are expanded from the saved secrets and the server's "
-        "environment as in a conversation (OAuth servers excepted). "
+        "environment as in a conversation (an OAuth server's `auth` excepted). "
         "Returns 200 with `ok=false` for connection / timeout failures "
         "and for references that match nothing "
         "(those are expected during validation, not server errors)."
